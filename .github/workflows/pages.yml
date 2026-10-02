@@ -1,6 +1,7 @@
 name: Deploy website
 
-# Publishes the static site in website/ to GitHub Pages. Skipped while the
+# Publishes the static site in website/ to GitHub Pages (live at
+# https://rexjaguarius.github.io/SoloTone/). Skipped while the
 # repository is private (Pages needs a public repo on a free plan).
 on:
   push:
