@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local runtime content (created next to solotone.py on first launch, or
+# accumulated from actually using the app — not app source)
+/nam/
+/irs/
+/profiles/
+/pedal_presets/
+
+# Dev-only experiments, never part of the shipped app (see memory:
+# backlog-12string-emulation — failed prototype, kept around for
+# reference, not meant to ship)
+/prototypes/
+
+# Claude Code's own session-runtime state, not project source
+.claude/*.lock
+
+# Packaging output — build/dist/*.exe is a release artifact, not source;
+# keep the build scripts and icon, but not the generated binaries.
+/build/dist/
+/build/work/
+/build/spec/

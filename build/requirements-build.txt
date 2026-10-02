@@ -1,0 +1,5 @@
+# Extra dependencies needed only to package SoloTone into a Windows .exe.
+# End users running `python solotone.py` from source don't need these —
+# see the top-level requirements.txt for that.
+pyinstaller>=6.0
+pillow>=10.0      # only for build/make_icon.py, regenerating solotone.ico

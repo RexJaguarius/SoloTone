@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SoloTone</title>
+<meta name="description" content="SoloTone turns your computer into an amp, a pedalboard, a looper, a tuner, and a metronome — one window, no cables, nothing sent anywhere but your own speakers.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-tally" viewBox="0 0 120 120">
+      <path d="M22 58 V44 Q22 20 60 20 Q98 20 98 44 V58" fill="none" stroke="#adadad" stroke-width="6" stroke-linecap="round"/>
+      <rect x="14" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <rect x="90" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <circle cx="60" cy="66" r="30" fill="#202020" stroke="#adadad" stroke-width="3.5"/>
+      <path d="M40 62 Q46 54 52 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M68 62 Q74 54 80 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M46 78 Q60 90 74 78" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="98" cy="58" r="9" fill="#ff6b6b" opacity="0.2"/>
+      <circle cx="98" cy="58" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+    <symbol id="i-amp" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="34" fill="none" stroke="#adadad" stroke-width="4"/>
+      <circle cx="60" cy="60" r="21" fill="none" stroke="#adadad" stroke-width="3" opacity="0.7"/>
+      <circle cx="60" cy="60" r="8" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-pedal" viewBox="0 0 120 120">
+      <circle cx="58" cy="68" r="30" fill="none" stroke="#adadad" stroke-width="4"/>
+      <path d="M40 52 A30 30 0 0 1 76 44" fill="none" stroke="#c9c9c9" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+      <circle cx="90" cy="32" r="9" fill="#ff6b6b" opacity="0.18"/>
+      <circle cx="90" cy="32" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+    <symbol id="i-loop" viewBox="0 0 120 120">
+      <path d="M62 26 A34 34 0 1 1 27 56" fill="none" stroke="#1f7e89" stroke-width="6" stroke-linecap="round"/>
+      <path d="M62 26 L50 22 M62 26 L55 37" stroke="#1f7e89" stroke-width="6" stroke-linecap="round" fill="none"/>
+    </symbol>
+    <symbol id="i-tuner" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="32" fill="none" stroke="#adadad" stroke-width="4"/>
+      <line x1="60" y1="60" x2="76" y2="31" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="60" cy="60" r="6.5" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-metro" viewBox="0 0 120 120">
+      <path d="M40 100 L52 28 L68 28 L80 100 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <line x1="60" y1="92" x2="73" y2="40" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="73" cy="40" r="5" fill="#1f7e89"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="site-header">
+  <a class="brand" href="index.html">
+    <svg class="brand-mark" viewBox="0 0 120 120"><use href="#i-tally"/></svg>
+    <span class="brand-word">SoloTone</span>
+  </a>
+  <nav class="site-nav">
+    <a href="index.html" class="active">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</header>
+
+<main class="container">
+
+  <section class="hero">
+    <span class="eyebrow">For guitarists who practice alone</span>
+    <h1>Plug in. Everything else is already here.</h1>
+    <p class="lead">SoloTone turns the computer already on your desk into an amp, a pedalboard,
+      a looper, a tuner, and a metronome — one window, no cables to untangle, and nothing sent
+      anywhere but your own speakers.</p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="download.html">Get SoloTone</a>
+      <a class="btn btn-ghost" href="features.html">See what's inside</a>
+    </div>
+  </section>
+
+  <div class="rule" style="margin-bottom:48px"></div>
+
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">The quick tour</span>
+      <h2>Five tools. One line in.</h2>
+      <p>Everything a bedroom rig needs, minus the bedroom rig.</p>
+    </div>
+    <div class="tool-grid">
+      <div class="tool-card">
+        <svg class="icon" viewBox="0 0 120 120"><use href="#i-amp"/></svg>
+        <h3>Amp &amp; Cabs</h3>
+        <p>Real amp modeling and cabinet tone, no hardware required.</p>
+      </div>
+      <div class="tool-card">
+        <svg class="icon" viewBox="0 0 120 120"><use href="#i-pedal"/></svg>
+        <h3>Pedals</h3>
+        <p>Wah, fuzz, drive, chorus, delay, reverb — stomp them in, out, and in any order.</p>
+      </div>
+      <div class="tool-card">
+        <svg class="icon" viewBox="0 0 120 120"><use href="#i-loop"/></svg>
+        <h3>Looper</h3>
+        <p>Stack up to ten layers and jam with a band made entirely of you.</p>
+      </div>
+      <div class="tool-card">
+        <svg class="icon" viewBox="0 0 120 120"><use href="#i-tuner"/></svg>
+        <h3>Tuner</h3>
+        <p>Always on at the bottom of the screen, in 14 alternate tunings.</p>
+      </div>
+      <div class="tool-card">
+        <svg class="icon" viewBox="0 0 120 120"><use href="#i-metro"/></svg>
+        <h3>Metronome</h3>
+        <p>Five click sounds, tap tempo, and timing that never drifts.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="cta-band">
+      <div>
+        <h2>No cloud. No account. No subscription.</h2>
+        <p>SoloTone runs entirely on your machine and never talks to the internet — what you
+          play stays exactly where you played it.</p>
+      </div>
+      <a class="btn btn-primary" href="download.html">Get SoloTone</a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <span>SoloTone — runs entirely on your machine.</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</footer>
+
+</body>
+</html>

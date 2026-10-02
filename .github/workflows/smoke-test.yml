@@ -1,0 +1,65 @@
+name: Cross-platform smoke test
+
+# Runs on every push/PR to main, plus on-demand via the Actions tab
+# ("Run workflow" button) for an ad-hoc check before distributing a
+# build. Linux/macOS/Windows in one matrix — this is the real reason
+# to have this workflow at all: a code review can't tell you whether
+# Tkinter, scipy, Pillow, and python-rtmidi actually come together
+# cleanly on three different OSes, only running on them can.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # PortAudio and Tk aren't bundled with Python on Linux the way the
+      # sounddevice/Tk installs on Windows and macOS already are.
+      - name: Install system audio/GUI dependencies (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 portaudio19-dev python3-tk xvfb
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check every module
+        run: |
+          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('solotone.py','pedals.py','nam_engine.py','version.py')]"
+
+      - name: Pedal-chain DSP regression tests (no display needed)
+        run: python tests/test_pedals_dsp.py
+
+      # No Tkinter involved — isolates a real, macOS-only crash found by
+      # the first run of this workflow (fatal GIL error inside
+      # rtmidi.MidiIn().get_ports(), see test file for the full story).
+      # Runs on every OS since it's cheap and a regression here could in
+      # principle hit any platform, not just the one it was first found on.
+      - name: python-rtmidi port-listing probe (no display needed)
+        run: python tests/test_midi_ports_macos.py
+
+      # No real display on a Linux runner — xvfb-run fakes one so
+      # Tkinter can still open a real window to test against. Windows
+      # and macOS runners already have one.
+      - name: Full-app GUI smoke test (Linux, via Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python tests/test_app_smoke.py
+
+      - name: Full-app GUI smoke test (Windows/macOS)
+        if: runner.os != 'Linux'
+        run: python tests/test_app_smoke.py

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Features — SoloTone</title>
+<meta name="description" content="A tour of everything SoloTone does: amp and cabinet modeling, a full pedalboard, a ten-layer looper, an always-on tuner, a sample-accurate metronome, MIDI control, and recallable Tone Profiles.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-tally" viewBox="0 0 120 120">
+      <path d="M22 58 V44 Q22 20 60 20 Q98 20 98 44 V58" fill="none" stroke="#adadad" stroke-width="6" stroke-linecap="round"/>
+      <rect x="14" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <rect x="90" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <circle cx="60" cy="66" r="30" fill="#202020" stroke="#adadad" stroke-width="3.5"/>
+      <path d="M40 62 Q46 54 52 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M68 62 Q74 54 80 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M46 78 Q60 90 74 78" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="98" cy="58" r="9" fill="#ff6b6b" opacity="0.2"/>
+      <circle cx="98" cy="58" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+    <symbol id="i-amp" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="34" fill="none" stroke="#adadad" stroke-width="4"/>
+      <circle cx="60" cy="60" r="21" fill="none" stroke="#adadad" stroke-width="3" opacity="0.7"/>
+      <circle cx="60" cy="60" r="8" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-pedal" viewBox="0 0 120 120">
+      <circle cx="58" cy="68" r="30" fill="none" stroke="#adadad" stroke-width="4"/>
+      <path d="M40 52 A30 30 0 0 1 76 44" fill="none" stroke="#c9c9c9" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+      <circle cx="90" cy="32" r="9" fill="#ff6b6b" opacity="0.18"/>
+      <circle cx="90" cy="32" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+    <symbol id="i-loop" viewBox="0 0 120 120">
+      <path d="M62 26 A34 34 0 1 1 27 56" fill="none" stroke="#1f7e89" stroke-width="6" stroke-linecap="round"/>
+      <path d="M62 26 L50 22 M62 26 L55 37" stroke="#1f7e89" stroke-width="6" stroke-linecap="round" fill="none"/>
+    </symbol>
+    <symbol id="i-tuner" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="32" fill="none" stroke="#adadad" stroke-width="4"/>
+      <line x1="60" y1="60" x2="76" y2="31" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="60" cy="60" r="6.5" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-metro" viewBox="0 0 120 120">
+      <path d="M40 100 L52 28 L68 28 L80 100 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <line x1="60" y1="92" x2="73" y2="40" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="73" cy="40" r="5" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-midi" viewBox="0 0 120 120">
+      <rect x="22" y="22" width="32" height="32" rx="6" fill="none" stroke="#adadad" stroke-width="4"/>
+      <rect x="66" y="22" width="32" height="32" rx="6" fill="none" stroke="#adadad" stroke-width="4"/>
+      <rect x="22" y="66" width="32" height="32" rx="6" fill="#1f7e89"/>
+      <rect x="66" y="66" width="32" height="32" rx="6" fill="none" stroke="#adadad" stroke-width="4"/>
+    </symbol>
+    <symbol id="i-save" viewBox="0 0 120 120">
+      <path d="M28 18 H78 L100 40 V102 H28 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M78 18 V40 H100" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M43 66 L57 80 L88 50" fill="none" stroke="#1f7e89" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="site-header">
+  <a class="brand" href="index.html">
+    <svg class="brand-mark" viewBox="0 0 120 120"><use href="#i-tally"/></svg>
+    <span class="brand-word">SoloTone</span>
+  </a>
+  <nav class="site-nav">
+    <a href="index.html">Home</a>
+    <a href="features.html" class="active">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</header>
+
+<main class="container">
+
+  <section style="padding-bottom:0">
+    <span class="eyebrow">What's inside</span>
+    <h1 style="font-size:clamp(2.2rem,5.5vw,3.4rem); max-width:20ch; margin-top:10px;">
+      A whole rig, none of it plugged into anything but itself.
+    </h1>
+    <p style="color:var(--muted); font-size:1.05rem; max-width:60ch; margin-top:14px;">
+      Every tool below runs at once, sharing the same signal, so switching tabs never means
+      switching rigs.
+    </p>
+  </section>
+
+  <section>
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-amp"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>An amp rig with no amp</h3>
+        <p>Load a captured amp tone, drop in a cabinet, and shape it with a 5-band EQ
+          plus a dedicated output Level fader — all before the signal ever leaves your
+          laptop. A built-in noise gate and hum filter keep things quiet between phrases,
+          and input/output gain make it easy to match whatever you're plugging in. Blend
+          two cabinet IRs together instead of just switching between them, and hit the
+          one-button Panic switch any time you need dead silence, instantly.</p>
+        <div class="feature-stat">5 cabinet slots · IR blending · 5-band EQ · noise gate &amp; hum filter · Panic mute</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-pedal"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>A pedalboard that never needs new batteries</h3>
+        <p>A tube-style compressor, wah (manual or auto-sweep), fuzz, four distortion voicings
+          (Boss DS-1, RAT, Distortion+, Metal), overdrive with a transparent Klon mode, chorus,
+          flanger, delay, and reverb — each with its own on/off switch. Build the board you'd
+          actually save up for, then click effects in and out without ever standing up — and
+          restack the order any way you like, because a wah before a fuzz and a wah after it
+          are two completely different pedals. Found a fuzz setting worth keeping? Save just
+          that pedal as its own mini-preset and reuse it on a completely different sound later.</p>
+        <div class="feature-stat">8 effects · reorderable chain · tap-tempo delay · per-pedal presets</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-loop"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>Practice with a whole band, minus the band</h3>
+        <p>Lay down a rhythm part, then a lead, then a harmony, and hear all three come back
+          at once — through your full tone, not a separate recording. Manual mode for full
+          control, or Auto mode to record hands-free, layer after layer. Mute any layer on
+          the fly, or export one — or the whole mix — straight to a WAV file.</p>
+        <div class="feature-stat">10 layers · manual or auto · per-layer mute · export to WAV</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-tuner"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>Always in tune, never in the way</h3>
+        <p>A tuner strip lives at the bottom of the screen no matter which tab you're on —
+          no clip-on, no separate app. Pick from 14 alternate guitar tunings and it'll tell
+          you exactly which string needs love, and by how much. A Guitar/Bass toggle swaps
+          in 4- and 5-string bass tunings and retunes the detector's range to match.</p>
+        <div class="feature-stat">14 guitar tunings · 4/5-string bass · sub-cent accuracy</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-metro"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>The one bandmate who's always on time</h3>
+        <p>Five click sounds, tap tempo, and every time signature you'd actually use — with
+          timing locked to the sample, so it never drifts even if your computer is busy doing
+          something else.</p>
+        <div class="feature-stat">5 sound kits · 30–250 BPM</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-midi"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>Drive the whole rig from a real controller</h3>
+        <p>Plug in any class-compliant USB-MIDI pad/knob controller and map its knobs and
+          pads to almost anything — pedal on/off, drive and mix knobs, amp gain, tap tempo,
+          loop record, cabinet A/B — with a simple "Learn" click, no hardcoded device
+          required. No MIDI gear on hand? Every mappable control has a keyboard shortcut
+          too. On an Akai LPD8 mk2 specifically, its pads can even light up to show what's
+          currently on.</p>
+        <div class="feature-stat">~40 mappable controls · keyboard shortcuts · pad LED feedback</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-save"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>Recall your exact sound, not close enough</h3>
+        <p>A Tone Profile captures the whole rig in one file — amp, cabinet, every pedal and
+          its settings, EQ, gain, tuning, all of it — so your clean tone and your lead tone
+          are both one click away instead of a five-minute re-dial. Tone Profiles are full
+          rigs; per-pedal presets are smaller and travel between them, so a favorite pedal
+          setting isn't locked inside whichever rig it was saved in.</p>
+        <div class="feature-stat">one-click recall · nothing re-dialed by hand</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="cta-band">
+      <div>
+        <h2>Ready to plug in?</h2>
+        <p>It's free to try and it runs on your own machine.</p>
+      </div>
+      <a class="btn btn-primary" href="download.html">Get SoloTone</a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <span>SoloTone — runs entirely on your machine.</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</footer>
+
+</body>
+</html>

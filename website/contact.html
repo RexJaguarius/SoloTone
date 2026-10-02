@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contact — SoloTone</title>
+<meta name="description" content="Questions, bug reports, feature ideas — get in touch about SoloTone.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-tally" viewBox="0 0 120 120">
+      <path d="M22 58 V44 Q22 20 60 20 Q98 20 98 44 V58" fill="none" stroke="#adadad" stroke-width="6" stroke-linecap="round"/>
+      <rect x="14" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <rect x="90" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <circle cx="60" cy="66" r="30" fill="#202020" stroke="#adadad" stroke-width="3.5"/>
+      <path d="M40 62 Q46 54 52 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M68 62 Q74 54 80 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M46 78 Q60 90 74 78" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="98" cy="58" r="9" fill="#ff6b6b" opacity="0.2"/>
+      <circle cx="98" cy="58" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="site-header">
+  <a class="brand" href="index.html">
+    <svg class="brand-mark" viewBox="0 0 120 120"><use href="#i-tally"/></svg>
+    <span class="brand-word">SoloTone</span>
+  </a>
+  <nav class="site-nav">
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html" class="active">Contact</a>
+  </nav>
+</header>
+
+<main class="container">
+
+  <section style="padding-bottom:0">
+    <span class="eyebrow">Say hello</span>
+    <h1 style="font-size:clamp(2.2rem,5.5vw,3.4rem); max-width:16ch; margin-top:10px;">
+      Questions, bugs, and feature ideas all welcome.
+    </h1>
+    <p style="color:var(--muted); font-size:1.05rem; max-width:56ch; margin-top:14px;">
+      SoloTone is built by one person, in spare time — a real message reaches a real inbox,
+      not a support queue.
+    </p>
+  </section>
+
+  <section>
+    <form class="form-grid" id="contact-form">
+      <div class="field">
+        <label for="cf-name">Name</label>
+        <input type="text" id="cf-name" name="name" autocomplete="name" required>
+      </div>
+      <div class="field">
+        <label for="cf-email">Your email</label>
+        <input type="email" id="cf-email" name="email" autocomplete="email" required>
+      </div>
+      <div class="field">
+        <label for="cf-message">Message</label>
+        <textarea id="cf-message" name="message" required></textarea>
+      </div>
+      <div>
+        <button type="submit" class="btn btn-primary">Send</button>
+      </div>
+      <p class="form-note">This opens your email app with the message pre-filled, addressed to
+        <a class="direct-email" href="mailto:rexjaguarius@gmail.com">rexjaguarius@gmail.com</a>.
+        SoloTone doesn't have a server yet, so nothing is collected or stored along the way —
+        prefer to skip the form? That address works directly too.</p>
+    </form>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <span>SoloTone — runs entirely on your machine.</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</footer>
+
+<script>
+  document.getElementById('contact-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = document.getElementById('cf-name').value.trim();
+    var email = document.getElementById('cf-email').value.trim();
+    var message = document.getElementById('cf-message').value.trim();
+    var subject = 'SoloTone — message from ' + (name || 'the website');
+    var body = message + '\n\n— ' + (name || 'Anonymous') + ' (' + email + ')';
+    var mailto = 'mailto:rexjaguarius@gmail.com'
+      + '?subject=' + encodeURIComponent(subject)
+      + '&body=' + encodeURIComponent(body);
+    window.location.href = mailto;
+  });
+</script>
+
+</body>
+</html>

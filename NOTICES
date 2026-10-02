@@ -1,0 +1,107 @@
+SoloTone — Third-Party Notices
+================================
+
+This file acknowledges third-party software whose code or architecture
+influenced or was adapted for use in SoloTone.
+
+
+1. Neural Amp Modeler (WaveNet inference engine)
+-------------------------------------------------
+The NAM amp processor in solotone.py implements a from-scratch
+WaveNet inference engine whose weight layout and forward-pass architecture
+are derived from the Neural Amp Modeler project:
+
+  Project:   https://github.com/sdatkinson/neural-amp-modeler
+  Author:    Steven Atkinson and contributors
+  License:   MIT
+
+  Copyright (c) 2022 Steven Atkinson
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+Note: The .nam file format is an open specification. SoloTone does not
+include or distribute any NAM capture files. Any .nam files you load are
+subject to their own individual licenses as set by their creators.
+
+
+2. Runtime dependencies
+------------------------
+SoloTone depends on the following packages at runtime. When run from
+source they are installed separately via pip. The packaged Windows .exe
+(built with PyInstaller) DOES bundle them, along with a Python runtime, so
+their license terms apply to that download too.
+
+  numpy        — BSD 3-Clause License
+                 https://numpy.org/doc/stable/license.html
+
+  sounddevice  — MIT License
+                 https://python-sounddevice.readthedocs.io
+
+  scipy        — BSD 3-Clause License (optional; improves EQ stability)
+                 https://scipy.org/install/
+
+  python-rtmidi — MIT License (optional; MIDI controller support)
+                 https://github.com/SpotlightKid/python-rtmidi
+
+  Pillow       — HPND License (optional; rounded buttons, pedal icons)
+                 https://python-pillow.org
+
+  PyInstaller  — GPL 2.0 with a bootloader exception permitting use in
+                 non-GPL applications (build tool only; used to produce
+                 the .exe)
+                 https://pyinstaller.org
+
+  tkinter      — Python Software Foundation License (part of Python stdlib)
+                 https://docs.python.org/3/library/tkinter.html
+
+  PortAudio    — MIT License (underlying C library used by sounddevice)
+                 http://www.portaudio.com
+
+Full license texts for each package are available in their respective
+repositories and PyPI pages.
+
+
+3. Impulse response files (user-supplied)
+------------------------------------------
+SoloTone does not include any impulse response (.wav) files. Files you load
+into the Cabinet IR slots are your own responsibility. If you obtained IR
+files from a third party, check that their license permits your intended use
+(personal, commercial, redistribution, etc.) before including them in any
+distribution of your own.
+
+
+4. Akai LPD8 mk2 pad LED protocol
+----------------------------------
+The optional pad-LED feedback for the Akai LPD8 mk2 sends MIDI SysEx
+messages whose byte layout was worked out by third parties, not documented
+by Akai:
+
+  https://github.com/john-kuan/lpd8mk2sysex
+
+SoloTone contains its own implementation; no code from that project is
+included. Akai Professional and LPD8 are trademarks of their owners; this
+project is not affiliated with or endorsed by them.
+
+
+5. Product and effect names
+----------------------------
+Names such as Fuzz Face, Big Muff, Boss DS-1, ProCo RAT, MXR Distortion+,
+Tube Screamer and Klon are trademarks of their respective owners. They are
+used only to describe the type of circuit an effect is modeled on. SoloTone
+is not affiliated with or endorsed by any of those companies.

@@ -1,0 +1,5 @@
+numpy>=1.24
+sounddevice>=0.4.6
+scipy>=1.11      # optional but recommended — better EQ filter stability at extreme settings
+python-rtmidi>=1.5   # optional — MIDI controller mapping (Settings tab). App runs fine without it.
+Pillow>=10.0     # optional — rounded button corners and the Pedals tab's status icons. App runs fine without it, just square buttons and no icons.

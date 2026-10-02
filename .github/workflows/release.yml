@@ -1,0 +1,58 @@
+name: Build Windows release
+
+# Push a tag like v1.0.1-rc1 (must match version.py's VERSION_FULL) and this
+# builds the .exe on a clean Windows runner and attaches it to a GitHub
+# Release. Tags containing "rc", "beta" or "alpha" are marked pre-release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r build/requirements-build.txt
+
+      - name: Check the tag matches version.py
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          full=$(python -c "from version import VERSION_FULL; print(VERSION_FULL)")
+          if [ "v$full" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match version.py (v$full)"; exit 1
+          fi
+
+      - name: Run the DSP tests
+        run: python tests/test_pedals_dsp.py
+
+      - name: Build the exe
+        run: python build/build_exe.py
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $full = python -c "from version import VERSION_FULL; print(VERSION_FULL)"
+          $stage = "SoloTone-v$full-windows"
+          New-Item -ItemType Directory $stage | Out-Null
+          Copy-Item "build/dist/SoloTone-v$full.exe" $stage
+          Copy-Item SoloTone_User_Guide.docx, LICENSE, NOTICES $stage
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          "ASSET=$stage.zip" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}

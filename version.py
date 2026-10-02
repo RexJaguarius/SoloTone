@@ -1,0 +1,1417 @@
+"""
+SoloTone — Version & Build Information
+=======================================
+Single source of truth for version, build number, and changelog.
+Imported by solotone.py for display in the title bar and About dialog.
+"""
+
+VERSION       = "1.0"           # Major.Minor — below 1.0 until first stable release
+BUILD         = 1               # Increments with every pushed change (reset to 1 at 1.0 RC1)
+BUILD_DATE    = "2026-10-02"
+STAGE         = "rc1"           # alpha | beta | rc1.. | release
+
+VERSION_FULL  = f"{VERSION}.{BUILD}-{STAGE}"   # e.g. "0.9.27-beta"
+VERSION_TITLE = f"SoloTone  v{VERSION_FULL}"   # for the window title bar
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGELOG
+# Format: (build, date, category, description)
+# Categories: FEATURE | FIX | CHANGE | REFACTOR | INTERNAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHANGELOG = [
+
+    # ── 1.0 release candidates ────────────────────────────────────────────────
+
+    (1, "2026-10-02", "CHANGE",
+     "Release Candidate 1 (v1.0.1-rc1). Version scheme reset from the "
+     "0.9.x-beta line (last: 0.9.79-beta) to 1.0, build counter back to 1. "
+     "No functional change from 0.9.79-beta: this is the build cut for "
+     "wider real-world testing, after the CI matrix (Ubuntu, macOS, "
+     "Windows) went green on build 79. Older changelog entries below keep "
+     "their original 0.9.x build numbers."),
+
+    # ── 0.9.x beta ────────────────────────────────────────────────────────────
+
+    (79, "2026-10-01", "FIX",
+     "Build 78's fix for the macOS CI crash (reusing a persistent "
+     "rtmidi.MidiIn() instead of one per call) did not actually work — "
+     "re-ran the exact same GitHub Actions macos-latest job afterward "
+     "and got the identical fatal GIL error in the identical place. "
+     "The theory was wrong, not just incomplete: this CI run's own new "
+     "isolated probe test (added alongside the build-78 fix, calling "
+     "list_ports() five times in a row with no Tkinter involved at "
+     "all) passed cleanly in 2 seconds on the very same macOS runner, "
+     "in the very same job, moments before the real app build crashed "
+     "on an equivalent call — ruling out CoreMIDI client churn as the "
+     "cause entirely, since the isolated probe churns through calls "
+     "just as much and never crashes. The actual common factor across "
+     "both crashes: list_ports() was being called synchronously while "
+     "a brand-new Tk widget tree was still under construction (once in "
+     "the Settings tab's device Combobox, built inline as "
+     "ttk.Combobox(..., values=MidiController.list_ports()), and once "
+     "in __init__'s last-used-port auto-reconnect, which ran "
+     "immediately after _build() returned) — both well before "
+     "mainloop() ever starts pumping Tk's own event loop. Fixed by "
+     "deferring both call sites via self.after() instead of calling "
+     "them inline during construction: the Combobox now builds with "
+     "empty values and self.after(0, self._midi_refresh_ports) "
+     "populates it moments later; the auto-reconnect logic moved into "
+     "a new _auto_reconnect_midi() method scheduled via self.after(250, "
+     "...) instead of running inline in __init__. Verified the fix is a "
+     "genuine fix and not just 'moved the crash a few lines over': "
+     "built a real App with a saved session pointing at a real "
+     "connected LPD8 mk2, confirmed it is NOT yet connected the instant "
+     "__init__ returns (proving the call really is deferred now) and IS "
+     "connected — combobox populated, status label reading 'Connected' "
+     "— a few hundred ms later once Tk's event loop has actually run. "
+     "Whether this is specifically a Tkinter-Cocoa-runloop-bootstrapping "
+     "vs. CoreMIDI-runloop-expectations conflict during that narrow "
+     "pre-mainloop window, or something else macOS-specific, is still "
+     "not root-caused beyond 'something about being mid-construction, "
+     "not the rtmidi call pattern itself' — but the practical fix (never "
+     "call into rtmidi synchronously while still building the window) "
+     "is verified by the thing that actually matters here: the next "
+     "GitHub Actions run passing the macos-latest job, which build 78 "
+     "could not."),
+
+    (78, "2026-10-01", "FIX",
+     "The build-76/77 GitHub Actions cross-platform CI matrix (set up "
+     "to actually smoke-test real-world distribution on Linux/macOS/"
+     "Windows, not just on this one Windows dev machine) caught a real, "
+     "macOS-only crash on its very first run — Linux and Windows both "
+     "passed cleanly. A fresh App() build was aborting with a fatal "
+     "(uncatchable — not a normal Python exception, a hard interpreter "
+     "abort) 'PyEval_RestoreThread: the function must be called with "
+     "the GIL held, but the GIL is released' error inside "
+     "rtmidi.MidiIn().get_ports(), called from the Settings tab's MIDI "
+     "Controller section while listing available devices. Matches a "
+     "known class of python-rtmidi/CoreMIDI issue (thestk/rtmidi#262 "
+     "and related reports) tied to repeatedly constructing and "
+     "discarding MidiIn/CoreMIDI client objects in quick succession — "
+     "MidiController.list_ports() was doing exactly that, a fresh "
+     "rtmidi.MidiIn() thrown away after every single call. Fixed by "
+     "reusing one persistent MidiIn instance for the process's "
+     "lifetime instead. Added an isolated probe test "
+     "(tests/test_midi_ports_macos.py, no Tkinter involved at all) that "
+     "calls list_ports() several times in a row and wired it into the "
+     "CI workflow on every OS, specifically so a regression back to the "
+     "construct-and-discard pattern gets caught by CI again before it "
+     "ever reaches a real Mac. Could not reproduce or verify this "
+     "locally (this dev machine is Windows-only). Turned out to be the "
+     "wrong theory — see build 79."),
+
+    (77, "2026-10-01", "FEATURE",
+     "Requested directly: the Pedal Status strip's icons now do two "
+     "things depending on exactly where you click. Clicking most of an "
+     "icon still jumps to and expands that pedal's own section, same as "
+     "before; clicking directly on the small LED dot in its corner "
+     "instead toggles that pedal on/off right from the strip, without "
+     "opening its section at all. Implemented as a single click handler "
+     "on the icon's Canvas that checks the click coordinates against the "
+     "LED's bounding box (a few px larger than the drawn oval, so it's "
+     "actually easy to hit) rather than two separate bound widgets, "
+     "since a Tk Canvas's own item-level bindings (tag_bind) and its "
+     "widget-level binding both fire on the same click with no built-in "
+     "way to make one suppress the other. The toggle path "
+     "(_toggle_pedal_on_from_strip) flips the exact same BooleanVar and "
+     "amp.pedals attribute the pedal's real Enabled checkbox does, not a "
+     "parallel flag, so MIDI/keybind state, LPD8 LED feedback, and Tone "
+     "Profile saving all see it identically regardless of which widget "
+     "actually flipped it. Verified directly: clicking the LED hitbox "
+     "toggles the pedal and does not jump to its section; clicking "
+     "elsewhere on the same icon jumps to its section and does not "
+     "touch the on/off state; toggling from the strip updates the same "
+     "var a second pedal's real checkbox would use. First attempt at "
+     "testing this with a synthetic click produced a false negative — "
+     "Tk doesn't deliver synthetic Button-1 events to a widget that "
+     "isn't currently on the visible notebook tab — fixed by selecting "
+     "the Pedals tab before generating events, not by changing the "
+     "(already-correct) implementation."),
+
+    (76, "2026-10-01", "REFACTOR",
+     "Requested directly, after discussing the upside: split the pedal-"
+     "effects chain out of solotone.py into its own module, pedals.py — "
+     "PedalChain plus its internal helpers (_SVF, Oversampler, DCBlocker, "
+     "_hard_clip/_soft_clip/_asymmetric_clip, _muff_tone) and "
+     "DEFAULT_PEDAL_ORDER, about 650 lines. Same shape as the nam_engine.py "
+     "split (build 65): this code had zero Tkinter/App coupling to begin "
+     "with (plain numpy in, numpy out, confirmed by grepping the whole "
+     "block for tk./ttk./PANEL/ACCENT/etc. before moving anything — zero "
+     "hits), so the move was a straight cut-and-paste plus one import line "
+     "— solotone.py now does `from pedals import PedalChain, "
+     "DEFAULT_PEDAL_ORDER`, the only two names anything outside the block "
+     "ever referenced (confirmed the same way: grepped for every other "
+     "moved symbol — _hard_clip, Oversampler, _SVF, etc. — across the rest "
+     "of the file and found no other call sites). PEDAL_SECTION_TITLES, "
+     "PEDAL_ICON_SPECS, and the other Pedals-tab GUI metadata that happened "
+     "to sit between PedalChain's helpers and the class itself stayed in "
+     "solotone.py exactly where they were — pure UI labels/icon specs, not "
+     "DSP, no reason to move them. Verified behavior is unchanged, not just "
+     "that it imports: reran the full regression suite from the build-75 "
+     "Fuzz/Distortion fix (54 mode/tone/drive combinations, the 8-pedal "
+     "chain together, the mid-stream mode-switching stress test) against "
+     "the post-split code and got byte-identical results to the pre-split "
+     "run, then separately built a full App instance, flipped a pedal's "
+     "mode, and confirmed the Pedals tab still rebuilds correctly end to "
+     "end. Did not go further than one module — these pedals already share "
+     "helpers (_hard_clip, Oversampler, DCBlocker) and a common "
+     "PedalChain.process() loop, so one file per pedal would mean either "
+     "duplicating those shared pieces or adding import plumbing between "
+     "pedal files, for little organizational benefit at this codebase's "
+     "size."),
+
+    (75, "2026-10-01", "FIX",
+     "Reported directly, playing real guitar through it: Fuzz and "
+     "Distortion 'artifacting/clipping' and high-gain tones 'petering "
+     "out' at higher settings — specifically Big Muff, MXR Distortion+, "
+     "and (found once listening examples were sent back and forth) "
+     "Metal. Captured ~10s of real guitar live through the actual audio "
+     "interface and ran it through the real pedal code rather than "
+     "guessing from code review alone; confirmed two distinct, real "
+     "bugs, not just normal high-gain character. (1) Both Metal "
+     "Distortion's mid-scoop notch and all three Big Muff tone "
+     "positions (_muff_tone) ran their filters with no zi carried "
+     "between calls, so scipy defaulted to zero initial state at every "
+     "single audio block — resetting the filter's memory roughly every "
+     "5.8ms (256-sample blocks) instead of carrying it forward. Measured "
+     "directly: a ~0.1 amplitude discontinuity at every block boundary, "
+     "23x bigger than the filter's own natural step — squarely in "
+     "audible buzzing/artifacting territory, and completely independent "
+     "of Drive, matching it being audible even at Metal's drive=5. Fixed "
+     "by carrying persistent zi state the same way every other stateful "
+     "filter in this file already does (_dist_zi, HumFilter, "
+     "BiquadState) — new self._dist_notch_zi for Metal, new "
+     "self._muff_zi threaded through a reworked _muff_tone() that now "
+     "returns (y, new_zi) instead of silently resetting; also deleted a "
+     "redundant dead lfilter call in 'scoop' mode that computed a zi'd "
+     "result and then threw it away before recomputing the same thing "
+     "without zi. (2) MXR Distortion+ and Fuzz Face (_asymmetric_clip) "
+     "model a real diode pair's mismatched forward voltages with a "
+     "harder negative-side clip than positive — authentic to the real "
+     "circuit, and intentionally left alone — but nothing afterward ever "
+     "corrected for the DC bias that asymmetry introduces, so it grew "
+     "with Drive (measured +0.045 at drive 5 to +0.062 at drive 10 on a "
+     "sustained tone) and are pushed the waveform's positive side into "
+     "the final symmetric ±1 clip sooner and more often than the "
+     "negative side could use its own matching headroom — exactly a "
+     "'petering out instead of getting more aggressive' mechanism, not "
+     "just fizz. A real analog circuit solves this with a coupling "
+     "capacitor right after the clipping diodes for the same reason; "
+     "added its digital equivalent, a new DCBlocker class (single-pole "
+     "DC-blocking high-pass, cutoff a few Hz) applied right after the "
+     "asymmetric clip stage in both pedals. Measured after the fix: DC "
+     "bias stays at +0.0001-0.0002 regardless of drive (previously "
+     "0.045-0.08, essentially eliminated) and MXR's peak output no "
+     "longer sits pinned at exactly 1.0 across the whole drive range, "
+     "meaning the positive side has real headroom again instead of "
+     "being chopped flat. Verified with a full regression pass after "
+     "the fix, not just the two reported pedals: every Fuzz/Distortion "
+     "mode and tone-control combination across the full Drive range (54 "
+     "configurations) checked for NaN/Inf and out-of-range peaks, the "
+     "full 8-pedal chain run together, and a stress test rapidly "
+     "switching Fuzz mode/tone every single block (simulating turning "
+     "the dropdown while playing) to confirm the new persistent filter "
+     "state doesn't destabilize on a live parameter change. Confirmed "
+     "directly by ear against the real capture, both before (reproducing "
+     "the complaint) and after (confirming it's gone)."),
+
+    (74, "2026-10-01", "CHANGE",
+     "Asked directly after the build-73 doc pass: the website was never "
+     "updated for the app's current default theme (teal accent, neutral "
+     "dark grey) — it was still on its original green-accented, blue-"
+     "tinted-dark palette from before build 61/62 changed the app's own "
+     "colors, with only favicon.svg ever recolored to match (build 66). "
+     "Replaced every hardcoded color across styles.css and all 5 HTML "
+     "pages' inline SVG icon defs: the green accent (#3ddc97) and every "
+     "blue-tinted neutral (panel/ground/rule/screw/icon-stroke shades) "
+     "now map to the app's real DEFAULT_ACCENT/DEFAULT_BG constants (or a "
+     "derived shade of them, matching solotone.py's own ACCENT_DARK/"
+     "_scale_color convention for the dark-text-on-accent button color "
+     "and its hover state) — coral (#ff6b6b) was already an exact match "
+     "to the app's RED and was left untouched. Verified by actually "
+     "rendering both the homepage and Features page through a local "
+     "preview server and reading the result, not just trusting the sed "
+     "replacement counts — caught a false negative while doing this: the "
+     "first render still showed the old green because the browser had "
+     "cached styles.css from the same localhost URL during the build-73 "
+     "session, nothing to do with the edit itself. Confirmed the real fix "
+     "by fetching the stylesheet with cache disabled and re-rendering "
+     "with a cache-busted stylesheet link before trusting the screenshot."),
+
+    (73, "2026-10-01", "INTERNAL",
+     "Requested directly: a documentation and website catch-up pass covering "
+     "everything shipped since builds 44 (website) and ~29 (User Guide) that "
+     "had never been written up — Panic/Mute All, IR Blending, per-pedal "
+     "mini-presets, looper per-layer mute + WAV export, LPD8 mk2 pad LED "
+     "feedback, and the I/O & Levels tab's accordion/fixed-Start-Amp/device-"
+     "persistence changes. website/features.html gets two new feature rows "
+     "(MIDI Controller, Tone Profiles/presets) with matching new icons, plus "
+     "corrections to stats that had drifted (3-band EQ mentioned instead of "
+     "5-band, no IR blending, no bass tuning, no per-pedal presets); verified "
+     "by rendering it through a local preview server rather than assuming the "
+     "HTML/CSS matched intent. SoloTone_User_Guide.docx got the larger pass: "
+     "beyond adding the missing features above as new sections, found and "
+     "fixed three pre-existing staleness bugs where a reference TABLE had "
+     "never been updated when the BODY TEXT right above it was rewritten for "
+     "a later feature, so the two directly contradicted each other — the "
+     "Wah table still described the old single-Frequency control (pre-build-"
+     "41 Auto sweep mode), the 5-Band EQ table still described the old "
+     "3-band layout (pre-build-52), and the I/O Devices table still listed "
+     "a 64-1024 block-size range Windows build 38 removed as unusable with "
+     "NAM+IR loaded. Also found and fixed a structural bug unrelated to any "
+     "of that: the Looper chapter's 'Controls' table (Clear last layer / "
+     "Clear all) was positioned after the entire Settings/MIDI Controller "
+     "chapter instead of right after its own heading, almost certainly a "
+     "leftover from an earlier edit — moved it back into place and extended "
+     "it with the new mute/export rows at the same time. Edited via "
+     "python-docx at the XML level (iter_inner_content for true document "
+     "order, since paragraphs and tables interleave and paragraphs()/"
+     "tables() alone don't preserve that; new table rows/paragraphs cloned "
+     "from an existing one of the same kind rather than built from scratch, "
+     "so style, bullet numbering, bold-column formatting, and font size "
+     "match exactly). Caught and fixed a real formatting bug mid-pass, "
+     "before it shipped: an early version of the table-cell-writing helper "
+     "left a stray empty run ahead of the real one in every cell it touched "
+     "(invisible in Word, but not what a clean save should contain) — "
+     "traced to clearing a cell's text and then calling add_run() instead "
+     "of reusing the single run python-docx's own cell.text setter already "
+     "creates; re-ran the entire edit pass from a backup of the original "
+     "file with the fix in place rather than patching around it, and "
+     "verified the final XML byte-for-byte structurally matches an "
+     "untouched original row (one run per cell, correct bold/size)."),
+
+    (72, "2026-10-01", "FEATURE",
+     "Requested directly, two small I/O & Levels changes. (1) The tab's "
+     "four sections (Audio Devices, Levels, Noise Gate, Hum Filter) now "
+     "behave as an accordion, same mechanic the Pedals tab already uses "
+     "(_sec()'s group param) — Audio Devices starts open, the rest "
+     "start closed, and expanding one collapses whichever other was "
+     "open. The old standalone 'Transport' section (which held only the "
+     "Start Amp button) is gone — that button and its status label now "
+     "sit in a fixed row packed directly into the tab root, above and "
+     "outside the scrollable accordion area entirely, so Start Amp stays "
+     "visible and clickable no matter which section is open or how far "
+     "the tab is scrolled, not just 'usually visible if the right "
+     "section happens to be expanded.' (2) Audio device selections "
+     "(Host API, Input, Output, Tuner input) now persist across "
+     "sessions — previously every one of these silently reset to "
+     "'System default' on every single launch regardless of what was "
+     "last selected, so a real interface had to be re-picked by hand "
+     "every time the app opened. Restoring is defensive rather than "
+     "trusting the saved label blindly: each one is checked against the "
+     "actual device list for the restored Host API, and anything no "
+     "longer present (interface unplugged, USB re-enumerated under a "
+     "new name) falls back to System default with a single warning "
+     "dialog naming exactly which saved device(s) couldn't be found, "
+     "rather than either silently picking the wrong device or leaving a "
+     "selection that would fail when the amp actually tries to open "
+     "that stream. Verified directly: a distinctively-chosen input/"
+     "output pair round-trips exactly into a fresh App instance, and a "
+     "session file doctored with a nonexistent device name falls back "
+     "to System default and fires exactly one correctly-worded warning "
+     "naming the missing device."),
+
+    (71, "2026-09-30", "FEATURE",
+     "Fifth and last of the suggested batch: LPD8 mk2 pad LED feedback, "
+     "explicitly flagged as uncertain going in — Akai's own tech support "
+     "says there's no documented way to drive this device's pad LEDs "
+     "from incoming MIDI (unlike the original LPD8, which does support "
+     "it plainly), so this uses a third-party-reverse-engineered SysEx "
+     "sequence (github.com/john-kuan/lpd8mk2sysex) instead of an "
+     "official spec. New 'Enable LPD8 mk2 pad LED feedback (experimental"
+     ")' checkbox in the MIDI Controller section, off by default. Added "
+     "output-port support to MidiController (previously input-only): "
+     "opening a device now also best-effort-opens a matching output "
+     "port for this one purpose — discovered directly against the real "
+     "hardware that rtmidi enumerates one physical LPD8 mk2 as two "
+     "differently-suffixed ports per direction ('LPD8 mk2 0' in, "
+     "'LPD8 mk2 1' out), so an exact-name match would have silently "
+     "never found the output port at all; matched by base name (the "
+     "device name with its trailing index stripped) instead. Every pad "
+     "currently mapped to a toggle target (pedal on/off, Panic, EQ/Hum "
+     "Enabled, IR Blend Enabled) shows that target's own color when on "
+     "(pedals reuse their existing Pedal Status strip icon color) and "
+     "black when off; a pad mapped to a trigger target (tap tempo, loop "
+     "record, transport start/stop, ...) shows a dim idle glow and "
+     "flashes white briefly on press, since a momentary action has no "
+     "on/off state of its own to display. Driven by state, not by "
+     "hooking every call site that can change it: a new state_getter "
+     "convention on toggle-action closures (matching the existing "
+     "nudge_getter convention for continuous targets) lets the refresh "
+     "read any toggle target's current value generically, and the "
+     "refresh itself is wired to fire whenever anything relevant could "
+     "have changed (every pedal's existing on/off trace, plus one added "
+     "for Panic/EQ/Hum/IR-Blend) rather than only MIDI-originated "
+     "changes — so the LEDs stay correct whether a pedal was flipped by "
+     "mouse, keybind, MIDI, a Tone Profile load, or a pedal preset load. "
+     "Only resends the full 8-pad SysEx message when the computed colors "
+     "actually differ from the last send (there's no documented way to "
+     "address a single pad — every update is all 8 at once), so this "
+     "doesn't spam the device on every unrelated state check. Verified "
+     "in stages, each against the real connected unit rather than "
+     "assumed: (1) the SysEx builder byte-for-byte against the spec's "
+     "own documented static-white and rainbow examples; (2) that a raw "
+     "rainbow message sent through the real output port actually lit "
+     "the pads; (3) the full toggle/trigger-driven path — Fuzz, "
+     "Distortion, Panic, and Tap Tempo mapped to real factory-default "
+     "pad notes — visually confirmed live on the hardware twice, "
+     "matching the intended color and flash behavior exactly both "
+     "times. Persists across sessions (off by default so a fresh "
+     "install never starts sending SysEx to a device that hasn't been "
+     "confirmed compatible); turning it off sends one explicit all-off "
+     "message rather than leaving the board stuck on stale colors."),
+
+    (70, "2026-09-30", "FEATURE",
+     "Fourth of the suggested batch: looper per-layer mute + export to "
+     "WAV. Each recorded layer's row on the Looper tab now has a Mute/"
+     "Unmute button (recording is unaffected — only playback mixing "
+     "skips a muted layer) and an Export… button that writes just that "
+     "layer's raw, unmixed audio to a standalone WAV file; a new Export "
+     "Mix… button next to Clear last/Clear all writes the full loop "
+     "exactly as currently heard (unmuted layers only, at the current "
+     "layer/master volume). Looper.layer_mute is a plain bool list kept "
+     "parallel to Looper.layers — appended to on every completed layer, "
+     "popped on clear_last, reset on clear_all — checked in both the "
+     "live playback path (process()) and the new get_mix()/get_layer() "
+     "export helpers, so muting is consistent whether you're listening "
+     "live or exporting. WAV writing goes through a new write_wav_mono() "
+     "using the stdlib wave module (16-bit PCM) rather than a new "
+     "dependency — matches load_ir()'s existing no-extra-library stance "
+     "for WAV I/O. Verified directly: three synthetic layers at distinct "
+     "known amplitudes summed to the exact expected mix, muting one "
+     "dropped it from both get_mix() and live process() output exactly, "
+     "unmuting restored it, get_layer() returned the correct raw "
+     "(unmixed) layer, clear_last/clear_all kept layer_mute correctly "
+     "parallel to layers, and an exported WAV round-tripped through a "
+     "real wave.open() read with the correct channel count/sample rate/"
+     "frame count/sample values. Also drove the actual GUI: confirmed "
+     "each layer row renders its Mute/Export buttons, clicking Mute "
+     "flips the label to Unmute and the backend state together, and the "
+     "Export Mix… button writes a real playable file. No MIDI/keybind "
+     "mapping added for per-layer mute — the set of layers is dynamic "
+     "(0 to MAX_LOOP_LAYERS), unlike every other MIDI target which maps "
+     "to one fixed control, so it doesn't fit the existing registry "
+     "pattern without a redesign; flagging as a possible follow-up "
+     "rather than bolting on something that wouldn't generalize."),
+
+    (69, "2026-09-30", "FEATURE",
+     "Third of the suggested batch: per-pedal mini-presets. A Tone "
+     "Profile already captured the whole chain at once, but that locks a "
+     "favorite pedal setting inside whichever profile it was saved in — "
+     "each of the 8 pedal sections now has its own Save Preset…/Load "
+     "Preset… buttons, saving just that pedal's own fields (.stpedal "
+     "files, one subfolder per pedal under pedal_presets/) so e.g. a "
+     "favorite Klon setting can be reused across different amp profiles "
+     "instead of being re-dialed-in every time. PEDAL_PRESET_FIELDS is "
+     "derived from the existing PEDAL_PROFILE_FIELDS list by prefix "
+     "(comp_, wah_, fuzz_, etc.) rather than hand-listed a second time, "
+     "so the two can't drift apart — 'mute' and 'order' are excluded "
+     "since they're chain-level, not any one pedal's, and muff_tone "
+     "(Fuzz's Big Muff tone control, which doesn't share the fuzz_ "
+     "prefix) is folded in explicitly. Loading validates the file's "
+     "declared pedal type against the section you loaded it into and "
+     "refuses a mismatch (e.g. a Wah preset into the Fuzz section) with "
+     "a clear error instead of silently applying the wrong fields. "
+     "Reuses _rebuild_pedals_ui() — the same full-tab-rebuild mechanism "
+     "a Tone Profile load already relies on — to reflect every changed "
+     "slider/radio/checkbox at once; verified that rebuild both applies "
+     "the loaded values to the actual on-screen widgets (not just the "
+     "backend attributes) and preserves which pedal's accordion section "
+     "was open across the rebuild."),
+
+    (68, "2026-09-30", "FEATURE",
+     "Second of the suggested batch: IR blending. Up to 5 cabinet IRs "
+     "could already be loaded but only one was ever actually audible at "
+     "a time (A/B swapped between two, never mixed) — a new 'Blend A/B' "
+     "checkbox and ratio slider on the Signal Chain tab runs the current "
+     "A and B slots' convolutions simultaneously (each IRConv keeps its "
+     "own overlap-add tail, so running both every block is safe) and "
+     "mixes them at an adjustable ratio instead, reusing the exact same "
+     "A/B slot assignment the existing Toggle A/B button already uses "
+     "rather than a separate picker. Both the enable toggle and the "
+     "blend ratio are MIDI/keybind-mappable through the existing Learn "
+     "system (continuous ratio control included, for an expression-pedal "
+     "or MIDI-knob-driven live blend). Verified the actual math, not "
+     "just that it runs: blend at 0%/100% produces byte-identical output "
+     "to selecting that slot directly (not just 'close'), and a 50/50 "
+     "blend exactly equals averaging the two independently-run single-"
+     "slot outputs — both checked against real IR files, comparing full "
+     "audio-callback runs against each other rather than an external "
+     "from-scratch reference (an earlier attempt at the latter gave a "
+     "misleading ~0.02 'mismatch' that turned out to be a flaw in the "
+     "test's own reference reconstruction, not the blend code). Measured "
+     "CPU cost directly rather than assuming: blending roughly doubles "
+     "IR-stage time as expected (0.68ms to 1.2ms per 256-sample block, "
+     "real numbers, not estimated) — under 1ms of extra overhead against "
+     "a 5.8ms budget at the smallest block size, negligible in practice."),
+
+    (67, "2026-09-30", "FEATURE",
+     "First of a suggested batch (more to follow): a Panic / Mute All "
+     "control — a small PANIC button in the footer's bottom row (turns "
+     "red while engaged), plus a new 'Panic (Mute All)' target, first in "
+     "the Transport category, mappable to any keybind or MIDI pad "
+     "through the existing Learn system. Deliberately implemented at the "
+     "very last step of the audio callback (AmpProcessor._cb), after "
+     "pedals, NAM, the cab IR, the looper, and the metronome have all "
+     "already run and summed into the final mix — not by muting "
+     "pedals.mute or any single upstream source, which would have missed "
+     "whatever the looper is already playing back (loop layers don't "
+     "re-run through pedals.mute — they're already-recorded audio being "
+     "mixed in independently) and the metronome click (added after the "
+     "amp lock releases). Zeroing only the final output this way means "
+     "every source is covered by construction, including any added "
+     "later, and nothing needs to actually stop or reset — the looper's "
+     "playback position and the metronome's scheduling keep advancing "
+     "normally underneath, so un-panicking picks back up exactly in sync "
+     "instead of needing anything restarted. Deliberately not saved with "
+     "the session — always resets to off on launch, the same reasoning "
+     "pedal on/off states already don't persist (reopening the app "
+     "already-silenced with no visible reason would be its own kind of "
+     "confusing). The button's placement took a second pass: the "
+     "obvious spot (next to About, in the footer's top row) turned out "
+     "to have zero spare room — Tk's packer silently leaves a widget "
+     "completely unmapped rather than visibly clipped when its parent "
+     "runs out of space, so it would have rendered nowhere at the app's "
+     "default window size with no error to notice. Moved it to the "
+     "bottom row instead, packed first so it claims its space before "
+     "the row's variable-width cents label can grow into it; verified "
+     "mapped (not just 'probably fits') at the real default window size "
+     "both before and after simulating that label full of text."),
+
+    (66, "2026-09-30", "CHANGE",
+     "Requested directly: updated the app icon and documentation to match "
+     "the new theme (teal accent, neutral dark grey, red pedal LEDs — "
+     "builds 60-64) instead of the original green/blue-tinted palette. "
+     "build/make_icon.py's PLATE/INK/ACCENT constants now match "
+     "DEFAULT_BG/DEFAULT_ACCENT (CORAL stayed #ff6b6b — it already "
+     "matched the RED constant, which the theme picker deliberately "
+     "doesn't touch); regenerated build/solotone.ico and the "
+     "_APP_ICON_PNG_64/_APP_ICON_PNG_32 constants solotone.py embeds for "
+     "the window/taskbar icon at runtime, and recolored "
+     "website/favicon.svg the same way (same mark, just with its "
+     "background plate kept in since it's meant to stand alone as a "
+     "favicon). Did not touch the rest of the website (styles.css, page "
+     "colors) — that's a separate, bigger piece of brand surface than "
+     "'the icon' and wasn't asked for. Updated README.md and the User "
+     "Guide for everything shipped since they were last touched but "
+     "never documented: the Pedals tab's accordion behavior (build 64), "
+     "the Pedal Status strip's click-to-jump and fixed-red LEDs (builds "
+     "62-63), and the Appearance section's default accent color, which "
+     "the docs still said was the build-61 Venetian red rather than the "
+     "current teal."),
+
+    (65, "2026-09-30", "REFACTOR",
+     "Requested directly: split the NAM/WaveNet inference engine out of "
+     "solotone.py into its own module, nam_engine.py — NamLoadError, "
+     "WaveNetNAM, StreamingNAM, load_nam, and their internal helpers "
+     "(_act, _WR, _Conv1d, _WNLayer, _WNBlock, _WNHead), about 430 lines. "
+     "It had zero Tkinter/App coupling to begin with (plain numpy in, "
+     "numpy out), so the move was a straight cut-and-paste plus one "
+     "import line — solotone.py now does `from nam_engine import "
+     "NamLoadError, load_nam`, the only two names anything outside the "
+     "block ever referenced. Verified against real .nam files (not just "
+     "an import check): loaded 5 real captures from the user's library "
+     "post-split, ran streaming inference over many blocks on one of "
+     "them checking for NaN/Inf, and loaded one through the actual UI "
+     "path (_load_nam_from_path) end-to-end. No behavior change; the "
+     "graphics/theming code was deliberately left where it is (denser "
+     "coupling to the App's own state, not a clean split)."),
+
+    (64, "2026-09-30", "FEATURE",
+     "Requested directly: the Pedals tab's 8 effect sections now behave "
+     "as an accordion — expanding one automatically collapses whichever "
+     "other was open, so at most one is ever expanded at a time, instead "
+     "of every section's collapsed state being fully independent. "
+     "Compressor starts open on a fresh install; the rest start closed. "
+     "_sec() gained a `group` param for this (opening a member collapses "
+     "every other section registered under the same group name) and a "
+     "`default_collapsed` param (so these 8 can default to shut without "
+     "changing every other section elsewhere in the app, which keeps "
+     "their existing independent, all-open-by-default behavior). "
+     "Reused the existing section_collapsed persistence rather than "
+     "adding a separate 'which pedal is open' key — it already saves "
+     "and restores with the rest of the app's settings; a small "
+     "normalization step at startup also collapses this down to exactly "
+     "one open section if a session file saved before this feature "
+     "existed happened to have more than one (or none) of these 8 "
+     "marked open. Clicking a pedal's icon in the Pedal Status strip "
+     "(added last build) now also collapses whichever other section was "
+     "open, since it goes through the same expand path as clicking the "
+     "header directly. No .exe rebuild this round, per request — source "
+     "only from here on unless a build is asked for."),
+
+    (63, "2026-09-30", "FEATURE",
+     "Requested directly: clicking a pedal's icon in the Pedal Status "
+     "strip now jumps the Pedals tab to that pedal's own section further "
+     "down — expanding it first if it's currently collapsed — instead of "
+     "doing nothing. The scroll target is computed from the section's "
+     "actual on-screen offset (winfo_y()) rather than a guessed row "
+     "height times its position in the list, so it lands correctly no "
+     "matter which other sections above it happen to be open or "
+     "collapsed, and keeps working after reordering the chain. The "
+     "checkbox in that pedal's own section is still what actually turns "
+     "it on or off — the icon is a shortcut to get there, not a second "
+     "way to toggle it."),
+
+    (62, "2026-09-30", "FIX",
+     "Reported directly, with screenshots, right after build 61 shipped: "
+     "the tuner's START button wasn't vertically centered in the footer, "
+     "checkboxes still showed a light-grey box behind them, and the "
+     "transpose dropdown below Stop tone/About was visually smashed "
+     "against the buttons above it. Root cause of the last two: (1) "
+     "TCheckbutton/TRadiobutton were never actually styled for dark mode "
+     "— same underlying gap as the unstyled TButton fixed in build 60, "
+     "just not noticed until now; fixed by configuring both to use "
+     "PANEL/BG_WELL/ACCENT instead of clam's stock light indicator. (2) "
+     "build 60's rounded-button images used border=10, and a ttk 9-slice "
+     "image element's border sets a hard *minimum* button size (measured: "
+     "height = 31 + 2*border) regardless of font or padding — that "
+     "quietly inflated every button from ~35px to ~51px tall, which is "
+     "what broke the footer's tight fixed-height row and smashed the "
+     "combobox beneath it. Dropped border to 3 (~2px of inflation, "
+     "visually unnoticeable) — corners are still clearly rounded, "
+     "buttons are back to their original size, and the footer layout is "
+     "no longer fighting a size nothing asked it to grow into. The START "
+     "button's centering was a separate, smaller issue: the footer's "
+     "status+button column was packed to auto-center as a whole, but "
+     "packing a plain frame that way only centers its own (slightly "
+     "lopsided) bounding box — switched to the standard Tk fix, an inner "
+     "frame packed with expand=True inside a fill='y' outer frame, which "
+     "centers the actual content instead. Also changed the default "
+     "accent to a teal, #1F7E89 (picked directly via the OS color "
+     "picker), and made the Pedal Status strip's on-LED always RED "
+     "regardless of accent — it's a 'this pedal is hot' indicator, not "
+     "meant to change with the theme. Source-only per request — the "
+     "packaged .exe was not rebuilt this round."),
+
+    (61, "2026-09-30", "FIX",
+     "Reported directly, with a screenshot: the rounded button corners "
+     "from build 60 showed a stray white/light halo, and looked like only "
+     "a few buttons had actually picked up the radius at all. Root cause "
+     "was the button images' fully-transparent corners — ttk's own image "
+     "style element doesn't composite a transparent PNG's edges the way "
+     "a Canvas does, so a resize/ringing artifact (or, on some buttons, "
+     "clam's own default light background) showed through around the "
+     "rounded shape. Fixed by baking an OPAQUE PANEL-colored backdrop "
+     "into each button asset instead of leaving it transparent "
+     "(_button_asset_image) — there's no transparent pixel left for "
+     "anything to render wrong, and every button now shows a clean, "
+     "consistent radius. Also changed the accent color to Venetian red "
+     "(#A42A04) per request, and — since 'just pick one color' clearly "
+     "wasn't going to be the last word on it — added a new Appearance "
+     "section (Settings tab) with real color pickers for both the "
+     "accent and the background, persisted with the rest of the app's "
+     "settings. Choosing a color rebuilds the whole window immediately "
+     "(the current tab stays selected): most of this app's widgets are "
+     "plain tk.Label/tk.Frame with a literal bg=PANEL/fg=ACCENT handed "
+     "to Tk once at creation time, and unlike a ttk widget, a raw tk "
+     "widget never re-reads a Python variable afterward, so only "
+     "rebuilding every widget actually shows a changed color — the same "
+     "principle _rebuild_pedals_ui() already used for one tab after a "
+     "profile load, generalized here to the whole window "
+     "(_full_rebuild_ui). PANEL, the footer/gauge 'recessed well' shade, "
+     "and the near-black/dark-wash text-on-accent colors (formerly "
+     "separate hardcoded literals) are now all derived from whichever "
+     "accent/background the user picks, instead of chasing every place "
+     "a shade of the old colors was hand-picked. Also fixed a second, "
+     "related bug this surfaced: every section header's color was "
+     "pinned to whatever ACCENT happened to be at import time, because "
+     "Python evaluates a default argument value once, when the function "
+     "is defined (_sec(..., color=ACCENT)) — invisible normally, but it "
+     "meant every section title in the app would have silently ignored "
+     "the new color picker entirely."),
+
+    (60, "2026-09-30", "FEATURE",
+     "Requested directly: a visual pass on appearance — border radius on "
+     "buttons, a burgundy accent in place of the green, a darker neutral "
+     "grey background, and pedal icons with on/off indicators. Recolored "
+     "the palette (BG/PANEL to neutral dark greys instead of the old "
+     "blue-tinted ones; ACCENT from green to burgundy; two new derived "
+     "constants, ACCENT_DARK/ACCENT_DIM, replacing a couple of hardcoded "
+     "green literals that weren't already tied to the ACCENT variable, so "
+     "the whole scheme still comes from one place). Added a slight border "
+     "radius to every ttk.Button in the app — Tk has no native "
+     "border-radius property, so this generates a small rounded-rect "
+     "image per button visual state (normal/hover/pressed/disabled) with "
+     "Pillow and hands it to ttk as a 9-slice image element, layered into "
+     "the base TButton/Go.TButton styles directly so every existing "
+     "button picks it up with no per-call-site changes; Go.TButton (Start "
+     "Amp / Start Tuner) additionally gets the new burgundy fill as the "
+     "app's one 'primary action' style. Left alone: a handful of raw "
+     "tk.Button widgets (REC/ARM, the IR A/B slot buttons, pitch-pipe "
+     "note buttons) that intentionally use per-instance dynamic colors — "
+     "a different widget class that doesn't go through ttk styles at "
+     "all, so the same trick doesn't reach them; converting those to "
+     "rounded is a separate follow-up if wanted. Added a new 'Pedal "
+     "Status' strip at the top of the Pedals tab, below Chain Order: one "
+     "small generated stompbox-style icon per pedal (distinct color per "
+     "pedal type, in the current chain order) with a small LED dot that "
+     "lights up in the new accent color when that pedal is on — reads "
+     "its state from the pedal's own on/off Tk Variable (not the "
+     "PedalChain attribute directly), since a MIDI toggle sets that "
+     "variable before it updates the underlying attribute, and reading "
+     "the attribute from inside the variable's own write-trace would "
+     "otherwise show the stale, one-toggle-behind value. Updates live "
+     "regardless of whether a pedal was flipped by mouse, MIDI, or a "
+     "keybind, and reorders itself alongside the chain on Move up/down "
+     "or Reset to Default Order. Pillow is a new optional dependency "
+     "(pip install Pillow) — both the rounded buttons and the icon strip "
+     "are silently skipped if it isn't installed; nothing else about the "
+     "app depends on it."),
+
+    (59, "2026-09-29", "FEATURE",
+     "Reported directly: the Keybinds section only ever nudged the Wah "
+     "pedal, while the MIDI Controller section right below it could map "
+     "any of ~40 functions — real duplicate, inconsistent functionality. "
+     "Removed the old Wah-only keybind UI/logic entirely and replaced it "
+     "with a generic keyboard 'Learn' mapper over the same registry MIDI "
+     "uses (KEYBIND_MAPPABLE_TARGETS, generated from MIDI_MAPPABLE_TARGETS "
+     "so the two can't drift apart): click Learn, press a key. A knob-style "
+     "target (drive/mix/rate, EQ, gain, wah position, etc.) becomes an "
+     "Up/Down key pair instead of one key, since a keypress is a discrete "
+     "nudge, not a knob's continuous sweep — stepped via a new generic "
+     "_nudge_cc_target(), driven by nudge_range/nudge_getter metadata now "
+     "attached to every continuous MIDI action, so one function handles "
+     "every knob instead of a target-by-target special case. The existing "
+     "Wah Position Up/Down MIDI pad targets now go through this same "
+     "nudge function too, retiring the old bespoke _wah_nudge_step. Also "
+     "added: (1) collapsible sections — click any section's title bar "
+     "(▼/▶) on the Settings and Pedals tabs to collapse/expand it, state "
+     "persisted across restarts; (2) MIDI mappings for pedal-related "
+     "targets now save and load with the Tone Profile instead of only "
+     "the global MIDI file, since which knob/pad drives which pedal is "
+     "part of 'the sound' the same way the pedal chain itself is — "
+     "everything else (transport, EQ/amp) stays global across every "
+     "profile, since that's controller wiring, not part of the sound. "
+     "Keybind mappings, by contrast, stay entirely in the global session "
+     "file, never per-profile, since a keyboard layout belongs to the "
+     "player's setup, not to a particular tone. Old profile files with no "
+     "midi_mappings key are left untouched on load rather than having "
+     "their pedal mappings silently cleared."),
+
+    (58, "2026-09-28", "FIX",
+     "Reported directly: pedal order looked wrong ('the fuzz is way down "
+     "the list'). Root cause was never the hardcoded default — it was a "
+     "stale order silently carried over from a saved session file or a "
+     "loaded Tone Profile, which persist pedals.order and can leave it "
+     "far from the factory sequence with no way back short of manually "
+     "re-dragging every pedal. Added a 'Reset to Default Order' button "
+     "in a new Chain Order section on the Pedals tab that restores the "
+     "factory order in one click. Also pulled the factory order out of "
+     "a bare literal duplicated nowhere else into a single module-level "
+     "DEFAULT_PEDAL_ORDER constant, used both by PedalChain.__init__ and "
+     "the new reset button, so they can't drift apart the way two copies "
+     "of the same literal could — same discipline as PEDAL_PROFILE_FIELDS. "
+     "Separately, reordered the Settings tab's MIDI Controller list: the "
+     "Pedals category previously listed every pedal's on/off toggle "
+     "first and all their knobs afterward, so a knob like Wah Position "
+     "appeared before Compressor's own knobs despite Compressor being "
+     "first in the chain. Each pedal's toggle and its knobs are now "
+     "grouped together in DEFAULT_PEDAL_ORDER's sequence, so the whole "
+     "list reads top-to-bottom in the same order signal actually flows "
+     "through the chain. Purely a list reorder — no target ids, actions, "
+     "or existing MIDI mappings changed, since dispatch is by id lookup "
+     "(MIDI_TARGETS_BY_ID), not list position."),
+
+    (57, "2026-09-28", "FIX",
+     "Reported directly: the Wah Position MIDI target only accepted a "
+     "single CC (knob) mapping, which makes sense for a knob's absolute "
+     "sweep but not for a pad — a momentary press is one instant, not "
+     "a continuous 0-127 value, so there was no way to control Wah "
+     "Position from pads at all. Added Wah Position Up / Wah Position "
+     "Down as two new trigger targets (pad-mappable), each stepping the "
+     "position by the same step-size setting the keyboard Wah nudge "
+     "already uses — factored that step-nudge math out of _nudge_wah "
+     "into a shared _wah_nudge_step() so the keyboard shortcut and the "
+     "new MIDI pads move through identical code, not two copies that "
+     "could drift. Deliberately kept the keyboard's keybind-enabled "
+     "checkbox and text-field-focus guards local to the keyboard entry "
+     "point rather than pulling them into the shared core, so turning "
+     "off the keyboard shortcut doesn't silently disable the MIDI pads "
+     "too, or vice versa — verified directly, along with the "
+     "existing knob mapping and the wah-off no-op guard, all still "
+     "behaving correctly."),
+
+    (56, "2026-09-28", "FEATURE",
+     "Two MIDI follow-ups from real-world testing feedback. (1) Every "
+     "pedal slider and mode selector now updates live on the Pedals tab "
+     "when driven by MIDI, not just the handful (EQ, gain, gate) that "
+     "already had a stored widget reference — added a generic "
+     "attr-name-keyed widget registry (_pedal_widgets, populated by the "
+     "same _sl()/_radio_row() helpers that build the tab) and a single "
+     "_pedal_widget_sync() used by every continuous MIDI target, instead "
+     "of hand-wiring each one. delay_time needed its own small unit-"
+     "aware wrapper since the pedal stores it in seconds but its slider "
+     "works in milliseconds — a generic sync would have desynced one "
+     "or the other. (2) Long-press on a pedal's on/off pad (tap = "
+     "toggle, as before) now cycles that pedal's emulation type when it "
+     "has more than one — e.g. Distortion steps DS-1 → RAT → "
+     "Distortion+ → Metal → back to DS-1 — timed against how "
+     "long the pad is actually held (~450ms), not an artificial wait-"
+     "and-see delay the way double-tap detection would need even for a "
+     "plain single tap. Caught and fixed a real bug in this while "
+     "testing: pedals with only one voicing (Compressor, Reverb, Tuner "
+     "Mute) were going completely dead on any hold past the threshold "
+     "— the long-press timer firing unconditionally suppressed the "
+     "release's toggle, even when there was nothing to cycle to. Fixed "
+     "so the toggle is only suppressed when a mode actually got cycled; "
+     "verified both cases directly (a mode-cycling pedal's on/off state "
+     "stays untouched through a long hold, a mode-less pedal still "
+     "toggles normally through one), including real-timer end-to-end "
+     "runs, not just direct method calls, for the short-press, long-"
+     "press, and wah manual/auto sub-frame visibility paths."),
+
+    (55, "2026-09-28", "FEATURE",
+     "MIDI controller support (Settings tab), built and tested against an "
+     "Akai LPD8 but not specific to it — any class-compliant USB-MIDI "
+     "controller already has a driver on every OS, so the only real work "
+     "was reading its standard Note On/Off and Control Change messages "
+     "and mapping them, via a generic 'Learn' system rather than "
+     "hardcoding one device's default CC/note assignments. Press Learn "
+     "next to any of ~39 registered targets, then move a knob or hit a "
+     "pad — SoloTone captures whichever CC/note number it receives. "
+     "Knobs drive continuous controls (pedal Drive/Mix/Rate, all 5 EQ "
+     "bands + Level, Input/Output Gain, noise gate threshold, Wah "
+     "Position); pads toggle every pedal on/off (and tuner mute) or fire "
+     "one-shot actions (tap tempo, Amp/Metronome/Tuner start-stop, loop "
+     "record/stop, cabinet IR A/B). New optional dependency, "
+     "python-rtmidi — same soft-fail pattern as scipy, the app runs "
+     "identically without it, just without MIDI. MIDI messages are "
+     "decoded on rtmidi's own callback thread and queued for the GUI "
+     "thread to drain and dispatch (the same queue+poll bridge already "
+     "used for the metronome's beat light and the looper), since "
+     "Tkinter widgets aren't safe to touch from a non-GUI thread. "
+     "Device and mappings persist across sessions in their own file. "
+     "Verified directly and thoroughly before ever touching real "
+     "hardware: raw MIDI byte decoding for all three message types, the "
+     "Learn-then-apply flow for both continuous and toggle targets, that "
+     "a pad's note-off is correctly ignored (toggle acts once per press, "
+     "not per release), trigger targets firing exactly once, on-screen "
+     "slider sync for the targets that already had a stored widget "
+     "reference (EQ, gain, gate), and mapping persistence across a fresh "
+     "app instance. Also confirmed the packaged .exe actually bundles "
+     "rtmidi's compiled extension (PyInstaller picked it up "
+     "automatically, no extra config needed) rather than assuming it "
+     "would."),
+
+    (54, "2026-09-28", "FIX",
+     "Root-caused the 'digital noise... especially past half [drive]' "
+     "reported on the Fuzz pedal: aliasing from clipping at the plain "
+     "44.1kHz rate with no anti-aliasing measures. Any hard (or steep "
+     "soft) clip generates harmonics far above the input frequency; ones "
+     "that exceed Nyquist fold back down as inharmonic noise that gets "
+     "worse with both drive and note frequency, matching exactly what "
+     "was reported. Confirmed by direct measurement before touching any "
+     "code, then re-confirmed after: spectral energy at non-harmonic "
+     "bins from a driven clip dropped 6-15x with a 4x-oversampled clip "
+     "stage in place (bigger drop at higher drive). Added a general "
+     "Oversampler helper (stateful zi-carrying anti-imaging/anti-"
+     "aliasing filters, matching this file's existing BiquadState/"
+     "HumFilter pattern, so no click at block boundaries) and routed "
+     "both the Fuzz pedal's clip stage (both Fuzz Face and Big Muff "
+     "modes) and the Distortion pedal's (all 4 voicings share the same "
+     "underlying _hard_clip/_asymmetric_clip primitives, so the same bug "
+     "was latent there too, just not yet reported) through it. A first "
+     "measurement pass falsely showed zero improvement on the Fuzz "
+     "Face mode specifically — turned out to be a measurement bug, not a "
+     "fix bug: the metric was dominated by that mode's legitimate DC "
+     "offset (an expected byproduct of its asymmetric-clip character, "
+     "not aliasing), which swamped the much smaller true aliasing "
+     "component; excluding DC from the measurement recovered the "
+     "same ~6x improvement seen elsewhere. CPU cost of the fix is "
+     "trivial — measured 17-82x real-time headroom for the whole pedal "
+     "chain with both Fuzz and Distortion driven hard simultaneously, "
+     "at every block size."),
+
+    (53, "2026-09-23", "FEATURE",
+     "Metronome Mute: silences the click audio (Metronome.pull() skips "
+     "mixing the click sound into the output buffer) while leaving beat "
+     "scheduling untouched, so BPM timing and both beat-light indicators "
+     "keep running — a silent visual metronome for recording loops. "
+     "Added a persistent beat light to the footer strip (next to the "
+     "tuner, visible on every tab) that flashes in sync with the "
+     "Metronome tab's own dot strip, driven by the same beat_q queue, so "
+     "the beat is watchable without switching to the Metronome tab. Mute "
+     "state now persists across sessions, matching BPM/beats/subdivision/"
+     "sound kit. While implementing this, explicitly verified (asked to "
+     "double-check, not assumed) that metronome clicks were never being "
+     "recorded into loop layers in the first place: Looper.process() "
+     "records the amp-processed guitar signal only, and the metronome's "
+     "pull() is mixed into the final output after the looper's recording "
+     "tap runs, not before — confirmed both by reading the signal path "
+     "and with a direct test recording a loop layer with the metronome "
+     "running unmuted and checking it for click energy."),
+
+    (52, "2026-09-23", "FEATURE",
+     "EQ expanded from 3 bands to 5 (low shelf 100 Hz, peaking 400 Hz / "
+     "1 kHz / 2.5 kHz, high shelf 6 kHz), plus a new Level fader (±15 dB, "
+     "centered at 0) that trims overall output after the bands — the same "
+     "role a real EQ pedal's Level knob plays, distinct from the existing "
+     "Input/Output Gain controls elsewhere on the I/O tab. The section is "
+     "now a horizontal row of vertical faders (added vertical-orientation "
+     "support to the shared _scale() slider helper) instead of stacked "
+     "horizontal sliders, closer to a hardware graphic EQ pedal's layout "
+     "— shown to the user as an interactive mockup for approval before "
+     "building it for real. Tone Profiles updated to save/restore all 5 "
+     "band gains (was hardcoded to 3) plus the new Level value; verified "
+     "directly that a profile saved with a distinctive 5-band curve and a "
+     "non-zero Level round-trips exactly, including the slider UI "
+     "positions, into a fresh app instance. README.md and "
+     "SoloTone_User_Guide.docx updated to match."),
+
+    (51, "2026-09-21", "CHANGE",
+     "Revamped the app icon (window/taskbar, and the packaged .exe's icon): "
+     "removed the dark rounded-square background plate and scaled the face "
+     "itself up to the largest size that still keeps every stroke, "
+     "including outline width, inside the canvas (1.25x, solved against "
+     "the ear cups since they're the widest element) — the face reads "
+     "noticeably bigger at the small sizes a Windows taskbar actually "
+     "renders an icon at. build/make_icon.py now generates both "
+     "build/solotone.ico and the base64 PNGs solotone.py embeds at "
+     "runtime from the same geometry in one run, instead of the PNGs "
+     "having been a separate one-off render."),
+
+    (50, "2026-09-21", "FIX",
+     "The A4 calibration '+' button on the tuner strip, and the metronome "
+     "tempo '+' button, rendered as a blank line instead of a visible "
+     "glyph — both used the fullwidth Unicode plus sign (U+FF0B), which "
+     "apparently isn't covered by the app's font even though the matching "
+     "fullwidth minus sign next to each one renders fine. Switched both "
+     "to a plain ASCII '+'; the minus buttons were left untouched since "
+     "they already display correctly."),
+
+    (50, "2026-09-21", "INTERNAL",
+     "Docs cross-referenced against the code again and brought current "
+     "(last full pass was build 43/44) — README.md and "
+     "SoloTone_User_Guide.docx now cover: the Guitar/Bass tuner mode and "
+     "its 3 bass tuning presets, Tone Profiles (a new dedicated chapter "
+     "in the user guide), the IR loader's float/EXTENSIBLE WAV support "
+     "and last-browsed-folder memory for the NAM/IR dialogs, the IR "
+     "convolution FFT-sizing fix, and the Wah pedal's bass-range hint. "
+     "The docx edits were validated paragraph-by-paragraph against the "
+     "original (315 to 321 paragraphs, all anchors asserted against their "
+     "expected text before editing) after an earlier attempt in this same "
+     "session mis-indexed two insertions and had to be reverted and redone."),
+
+    (49, "2026-09-21", "FEATURE",
+     "Bass support, via a Guitar/Bass toggle on the tuner strip rather than "
+     "a separate pedal set (most pedals are broadband and work fine as-is; "
+     "only the tuning list and the tuner's own detection range are "
+     "actually guitar-specific). Bass mode swaps in 3 bass tuning presets "
+     "(Standard EADG, 5-String BEADG, Drop D DADG), shows only as many "
+     "string boxes as that tuning has strings (4 or 5, not always 6), and "
+     "retunes the pitch detector: lowered fmin (24 Hz, for a 5-string low "
+     "B at ~30.9 Hz), a longer analysis window (16384 vs 12288 samples, "
+     "matching the buffer-size margin reasoning from build 36), and — "
+     "found only by testing an actual low-B signal, not obvious up front "
+     "— fmax lowered to 600 Hz too. Without that last change, a low B "
+     "still failed to detect even with fmin correctly lowered: measured "
+     "directly, autocorrelation stays highly self-correlated at very "
+     "short lags for a fundamental this far below the default 1500 Hz "
+     "ceiling, and that near-zero-lag plateau outscored the true-period "
+     "peak. A session or profile with a bass tuning saved auto-switches "
+     "the toggle back to bass on load, so it isn't a separate setting to "
+     "remember to restore. Also added a hint under the Wah pedal's Range "
+     "control noting its defaults are guitar-voiced and bass players "
+     "likely want a lower sweep. Verified directly: all 5 strings of a "
+     "5-string bass (B0 through G2) now detect correctly (within a few "
+     "cents), the existing guitar detection range is unaffected, and a "
+     "profile saved in bass mode round-trips its tuning and instrument "
+     "toggle correctly."),
+
+    (48, "2026-09-21", "FEATURE",
+     "Added Tone Profiles: Save Profile.../Load Profile... on the Signal "
+     "Chain tab capture a whole recallable sound in one file — NAM/IR "
+     "paths (all 5 slots + active/labels), the entire pedal chain (every "
+     "effect's parameters plus chain order, via a single PEDAL_PROFILE_"
+     "FIELDS list so a future pedal/parameter is a one-line addition, not a "
+     "save/load rewrite), 3-band EQ, noise gate threshold, input/output "
+     "gain, hum filter, and the guitar tuning preset. Stored as JSON with "
+     "a new *.stprofile extension in their own profiles/ folder (created "
+     "alongside nam/ and irs/), carrying a 'solotone_profile' format "
+     "version separate from the app version so old profiles keep loading "
+     "if the format ever grows. Loading a profile whose NAM or IR file "
+     "can't be found shows an error naming exactly which file(s), while "
+     "still applying everything else in the profile. A profile is treated "
+     "as a whole sound, not a patch: loading one clears the current NAM "
+     "and all 5 IR slots first rather than merging with whatever was "
+     "loaded before it. Also fixed two latent issues surfaced while "
+     "building this: every pedal-tab control (checkbox/slider/radio) used "
+     "a hardcoded default instead of reading the pedal's actual current "
+     "value, so the Pedals tab could never have correctly reflected a "
+     "programmatically-restored state; and the 3-band EQ sliders had no "
+     "stored widget reference at all, making them impossible to sync "
+     "after a restore. Verified end-to-end: saved a profile with a "
+     "distinctive combination of settings across every category above, "
+     "reloaded it into a fresh app instance, and confirmed both the "
+     "underlying DSP state and every corresponding UI control (sliders, "
+     "checkboxes, mode radios) matched exactly; separately verified the "
+     "missing-file error path names every missing file while still "
+     "applying the rest of the profile."),
+
+    (47, "2026-09-21", "FIX",
+     "Two IR-loading bugs reported against real files, both reproduced and "
+     "root-caused directly: (1) a 32-bit float WAV IR failed to load at "
+     "all ('unknown format: 3') because load_ir() used the stdlib `wave` "
+     "module, which flatly refuses to open IEEE-float (format code 3) or "
+     "WAVE_FORMAT_EXTENSIBLE WAV files regardless of the surrounding "
+     "sample-width handling code that claimed to support them. Replaced "
+     "with a hand-rolled RIFF chunk parser (_read_wav_raw) that reads the "
+     "real format code (resolving EXTENSIBLE's sub-format GUID too) "
+     "instead of a magnitude/finite-value heuristic guess. (2) a "
+     "1-second stereo IR caused audio to cut in and out like a CPU "
+     "overload even though shorter IRs at the same bit depth ran fine — "
+     "measured directly: IRConv's FFT convolution size (block + IR length "
+     "- 1) happened to factor to include a large prime (1861) at every "
+     "available block size for this specific IR length, and numpy's FFT "
+     "is dramatically slower at a prime-heavy size than a nearby smooth "
+     "one (5.8ms/call measured at the natural size vs 0.56ms/call at the "
+     "nearest 5-smooth size, for the exact same math) — not a fundamental "
+     "IR-length cost, an unlucky size hitting a slow path. Fixed by "
+     "padding the FFT to the nearest 5-smooth length (_next_fast_len) "
+     "instead of the exact convolution length; the extra zero-padding "
+     "doesn't change the result, only which samples get discarded "
+     "afterward. Verified: both files now load correctly (finite, sane "
+     "peak values), convolution output still matches a reference "
+     "convolution to float32 precision, and the previously-pathological "
+     "IR now runs at ~0.98ms/call at blocksize 256 (5.9x real-time "
+     "headroom) instead of blowing the budget."),
+
+    (46, "2026-09-21", "FEATURE",
+     "The Load NAM / Load IR file dialogs now remember the last folder "
+     "browsed and reopen there next time, instead of always resetting to "
+     "the nam/ or irs/ folder next to the app. Tracked separately for NAM "
+     "vs IR (each dialog updates its own remembered folder independently), "
+     "persists across sessions, and falls back to the original default if "
+     "the remembered folder no longer exists. Verified directly: saving a "
+     "session after browsing to a different folder and reloading the app "
+     "restores that folder for both dialogs."),
+
+    (45, "2026-09-21", "FIX",
+     "Two tuner string-readout bugs reported together: (1) the 6-string label "
+     "boxes always showed sharp spellings (D#, G#, ...) even for 'Eb "
+     "standard', whose own name implies flats — added a flat-name table and "
+     "a per-tuning use-flats flag so Eb standard now reads Eb/Ab/Db/Gb/Bb/Eb "
+     "instead of D#/G#/C#/F#/A#/D#. (2) more impactful: a tuning restored "
+     "from a saved session never refreshed the label boxes at all, because "
+     "_load_session() set the tuning dropdown's value directly without "
+     "calling _reset_string_highlights() afterward, and a plain StringVar."
+     "set() doesn't fire the combobox's selection event that normally "
+     "triggers that refresh — so the boxes stayed stuck on whatever "
+     "tuning was displayed at first build (Standard) regardless of which "
+     "tuning was actually active underneath (live pitch detection and cents "
+     "readout were unaffected, since those re-read the tuning fresh on "
+     "every poll). Verified directly: a session saved with Eb standard now "
+     "shows the correct flat-spelled labels immediately on launch."),
+
+    (44, "2026-09-17", "FEATURE",
+     "Wah keybinds are now configurable instead of fixed to Left/Right: the "
+     "Settings tab has separate Increase key and Decrease key dropdowns "
+     "(arrow keys, Page Up/Down, bracket keys, comma/period, plus/minus), "
+     "defaulting to Right/Left to match the previous behavior. Implementation "
+     "swaps the two direct <Left>/<Right> binds for a single global "
+     "<KeyPress> handler that checks the pressed key's keysym against "
+     "whichever keys are currently assigned, so changing the assignment "
+     "takes effect immediately with no rebinding. Verified directly: the "
+     "default Right/Left pair moves the wah as before, and reassigning to "
+     "bracket keys both deactivates the old pair and activates the new one "
+     "on the next key press, with no restart needed. Both key assignments "
+     "persist across sessions. Also refreshed README.md and "
+     "SoloTone_User_Guide.docx (last revised at build 29) and the website's "
+     "Features/Download pages for everything shipped since — "
+     "Compressor, Distortion, Klon, Wah auto-sweep, Hum Filter, Host API "
+     "selector, the Settings tab, the current 256–2048 block-size "
+     "range, the Windows .exe, and a VoiceMeeter recording walkthrough."),
+
+    (43, "2026-09-17", "FEATURE",
+     "Added a Distortion pedal with 4 selectable voicings — Boss DS-1 (hard "
+     "silicon clip to a low fixed threshold, boxy/compressed), ProCo RAT "
+     "(op-amp into diodes, a touch rounder-edged), MXR Distortion+ (asymmetric "
+     "diode clip, softer and more compressed), and Metal (cascaded double "
+     "clipping stage plus a mid-scoop EQ) — Drive/Tone/Volume controls shared "
+     "across all four, Tone being a one-pole low-pass swept dark to bright. "
+     "Placed after Fuzz in the default chain order. Also added a Klon "
+     "(transparent) mode to the Overdrive pedal: a parallel clean + gently-"
+     "clipped blend with a treble/presence lift, instead of the Tubescreamer's "
+     "mid-hump-and-scoop character. Verified all 4 distortion voicings and the "
+     "Klon mode directly: no NaNs, output always clip-safe, and the Tone "
+     "control measurably changes brightness on every distortion mode."),
+
+    (42, "2026-09-17", "FEATURE",
+     "Added a Compressor pedal, tube-styled and placed first in the default "
+     "chain order (compressing before drive stages is the usual pedalboard "
+     "convention). Threshold/Ratio/Attack/Release/Makeup controls drive a "
+     "soft-knee gain computer (Giannoulis/Massberg/Reiss formula) fed by a "
+     "one-pole peak envelope follower with separate attack/release time "
+     "constants — the soft knee plus the slower one-pole tracking already "
+     "reads as rounder and less clampy than a hard-knee digital compressor. "
+     "A Warmth control (0-100%) blends in an asymmetric-tanh saturation stage "
+     "after compression for tube-style even-harmonic coloration. Verified "
+     "directly: a signal held below threshold passes at unity gain, a loud "
+     "steady tone is measurably compressed, and pushing Warmth and Makeup "
+     "gain hard on a hot signal still never exceeds the -1..1 output range."),
+
+    (41, "2026-09-17", "FEATURE",
+     "Wah pedal: added an Auto sweep mode alongside the existing manual control, "
+     "with its own Rate (Hz) and Intensity (0-100%, fraction of the range swept) "
+     "controls, an LFO computed once per audio block (same granularity the "
+     "chorus/flanger LFO already uses). The old single Frequency slider is "
+     "replaced by a Range (Hz) low/high pair shared by both modes — manual mode "
+     "now sets a Position (0-100%) within that range instead of an absolute Hz "
+     "value. A crossed range (low slider dragged above high) is silently "
+     "corrected in the DSP rather than producing an inverted or negative sweep."),
+
+    (41, "2026-09-17", "FEATURE",
+     "New Settings tab. Keybinds section: Left/Right arrow keys nudge the wah's "
+     "manual position by a configurable Hz step, global (works regardless of "
+     "which tab has focus) but skipped while an IR label field or the BPM "
+     "spinbox has text-entry focus, so normal cursor movement there is "
+     "unaffected; toggleable off entirely. Window section: 'Keep window always "
+     "on top' and 'Confirm before quitting while the amp is running' (a plain "
+     "yes/no dialog, no data-loss risk since the looper/session already save on "
+     "close either way). All four settings persist across sessions."),
+
+    (40, "2026-09-17", "FIX",
+     "Tuner didn't work when the amp wasn't running: self.tuner.device was only "
+     "ever assigned inside _tuner_dev_changed(), which fires solely on a manual "
+     "combobox click — it was never synced to the 'Tuner input' dropdown's "
+     "initial displayed selection, or resynced when the device list refreshed "
+     "(host API change or the (r) rescan button). So it stayed None (system-"
+     "default input, e.g. a laptop mic) even while the dropdown showed the real "
+     "interface selected, and standalone tuning (shared mode, amp running, was "
+     "unaffected since it reuses the amp's already-resolved device) silently "
+     "listened to the wrong device and never detected a plucked string. Fixed "
+     "by syncing tuner.device to the dropdown's value immediately after the "
+     "combobox is built, and re-running that sync inside _refresh_devices()."),
+
+    (39, "2026-09-16", "FIX",
+     "Periodic crackling reported to get worse specifically when another app "
+     "(e.g. a browser) was active and using CPU — not a compute-budget problem "
+     "(average headroom is comfortable at build 38's block sizes) but an OS "
+     "scheduling one: Windows can starve a background process of CPU time when "
+     "something else has focus, and even one missed audio callback deadline is "
+     "audible as a click. AmpProcessor.start()/stop() now raise/restore this "
+     "process's priority (HIGH_PRIORITY_CLASS, not REALTIME — that can wedge the "
+     "whole system if something in the process misbehaves) via ctypes' "
+     "SetPriorityClass, for as long as the amp stream is open. Caught and fixed "
+     "a real gotcha while implementing this: ctypes' default 32-bit return-type "
+     "guess mangles GetCurrentProcess()'s pseudo-handle on 64-bit Python, so "
+     "every call using it silently failed until restype/argtypes were declared "
+     "explicitly. Verified end-to-end through the real start()/stop() calls: "
+     "0x20 (Normal) -> 0x80 (High) on start, back to 0x20 on stop. Windows-only; "
+     "silently a no-op elsewhere."),
+
+    (38, "2026-09-16", "CHANGE",
+     "Block size options tuned from real-world testing of the build-37 speedups: "
+     "64 and 128 confirmed not to keep up with a full NAM+IR chain loaded even "
+     "after those fixes (IR convolution cost doesn't shrink with block size the "
+     "way NAM's now does) and are removed from the dropdown; 256 confirmed "
+     "working well and is now the default (down from 512); 4096 is no longer "
+     "needed and dropped from the list (was only ever a workaround for the "
+     "pre-build-37 slowness). Options are now 256/512/1024/2048. A session file "
+     "with an old out-of-range blocksize value is now ignored on load instead of "
+     "restoring a choice that's no longer in the dropdown."),
+
+    (37, "2026-09-16", "FIX",
+     "Found the real, complete cause of the amp's gain blow-up (the build-35 IR/"
+     "limiter fixes were treating the symptom): WaveNetNAM.fwd_stack() only applied "
+     "self.hscale on the A1 (top-level-head) branch. Every real .nam file loaded so "
+     "far has been A2 (self.head is None), which returned hi[0] completely unscaled "
+     "— with a head_scale of ~0.014 seen in the wild, that's a ~70x gain excess baked "
+     "into every sample, on top of anything the IR added. hscale is now applied "
+     "unconditionally. NAM-only output on the test signal used throughout this fix "
+     "went from an uncalibrated 20-48 peak to a correct 0.7 peak. The build-35 IR "
+     "L1-normalization fix and safety limiter both stay in place as legitimate "
+     "fixes in their own right, just no longer masking this."),
+
+    (37, "2026-09-16", "FEATURE",
+     "NAM inference rewritten to be genuinely incremental instead of reprocessing "
+     "the model's entire receptive field on every block. Measured cause: this "
+     "model's receptive field is 6332 samples (143.6ms); every callback was "
+     "concatenating that much history with the new block and running all 23 "
+     "layers over the whole thing from scratch — a ~50x redundancy factor (6459 "
+     "samples processed to produce 128 new ones), on top of the ~18x-too-slow "
+     "baseline from build 36. Fix: _Conv1d now caches its own small dilation-"
+     "history window (mix/proj/rechan are all 1x1 convs and need none) and "
+     "_WNLayer/_WNBlock/WaveNetNAM/StreamingNAM all gained *_stream methods that "
+     "consume only the new samples per call. Validated against the non-streaming "
+     "reference on the same signal at three different block sizes (37/128/4096): "
+     "matches to ~1e-8 everywhere except a <1ms cold-start transient at the very "
+     "first samples (a fixed startup artifact, not a recurring one). Measured "
+     "result: NAM alone at blocksize 128 went from 0.126x real-time headroom to "
+     "2.10x mean / 1.30x worst-case — roughly a 17x speedup."),
+
+    (37, "2026-09-16", "FIX",
+     "IRConv was recomputing the impulse response's own FFT on every single block, "
+     "even though the IR never changes between calls at a fixed block size — only "
+     "recomputed now when the IR or the block size actually changes. Combined with "
+     "the NAM fix, the full amp pipeline (NAM+IR+EQ+gate) at blocksize 512 measured "
+     "2.71x mean / 2.11x worst-case real-time headroom, safely covering a much "
+     "lower latency than the build-36 workaround of raising block size to "
+     "2048-4096. Block size default changed from 256 to 512; 64-256 are left in "
+     "the dropdown but are no longer reliably real-time with a full-length "
+     "(~500ms) cabinet IR loaded, since IR convolution cost doesn't shrink with "
+     "block size the way NAM's now does — a genuinely faster (partitioned) "
+     "convolution for long IRs would be the next target if 64-256 matter."),
+
+    (37, "2026-09-16", "FEATURE",
+     "Added a Hum Filter (I/O & Levels tab): cascaded notch filters at the mains "
+     "frequency and its next two harmonics (60/120/180 Hz, or 50/100/150 Hz), "
+     "applied to the raw input ahead of everything else — including the tuner, "
+     "which sees the cleaned-up signal too. Off by default. Verified on a "
+     "synthetic 60Hz+120Hz+220Hz test signal: -13.9dB at 60Hz, -23.8dB at 120Hz, "
+     "0.0dB (untouched) at 220Hz. Falls back to a no-op if scipy isn't installed, "
+     "matching the rest of the app's optional-scipy convention."),
+
+    (36, "2026-09-16", "FIX",
+     "Pitch pipe notes now toggle: clicking a note that's already sounding stops it "
+     "and un-highlights it (mint-green while active), instead of just restarting the "
+     "same tone with no visual indication it was still playing and no way to stop it "
+     "short of the separate Stop tone button."),
+
+    (36, "2026-09-16", "FIX",
+     "Tuner pitch detection made more stable on low strings: analysis window "
+     "increased from 8192 to 12288 samples (~186ms to ~278ms — a low string like "
+     "Drop A1 at 55Hz only got ~10 full cycles to analyze before, now ~15), and "
+     "detected frequencies are now median-filtered over the last 4 readings, "
+     "rejecting a single spurious frame without adding much perceptible lag. An "
+     "explicit octave-error correction was also attempted and reverted after testing "
+     "showed it broke previously-correct detections (any periodic signal is also "
+     "correlated at 2x its period, so 'prefer the longer period if comparably "
+     "strong' fired on normal, correct readings too, not just genuine octave errors)."),
+
+    (36, "2026-09-16", "FIX",
+     "Root-caused the persistent clicking/squelching with no real tone (present even "
+     "after the build-35 gain fixes, on multiple NAM files): the from-scratch NAM "
+     "engine simply can't run this model architecture in real time. Measured directly "
+     "— at blocksize 128 (2.9ms budget) NAM.process() took ~51.6ms per block, ~18x "
+     "too slow. Two changes: (1) _WNLayer.fwd() was computing self.conv.fwd(x) three "
+     "times and self.mix.fwd(c) twice per layer per block — the first line's result "
+     "was immediately discarded, dead code from an earlier edit. Removing it cut NAM "
+     "time to ~23ms (~2.2x speedup, zero behavior change). (2) The deeper issue: this "
+     "model's receptive field is 6332 samples (143.6ms) and StreamingNAM reprocesses "
+     "the entire history window through all 23 layers every block instead of caching "
+     "per-layer state — a ~50x redundancy factor (6459 samples processed to produce "
+     "128 new ones). Block size options extended to 2048/4096 so total per-second "
+     "compute drops (fewer, larger reprocessing passes) — measured real-time headroom "
+     "1.47x-2.16x for NAM alone at those sizes, though the full pipeline's worst-case "
+     "call time still occasionally exceeded budget even at 4096 in testing. This is a "
+     "real, meaningful improvement but not a complete fix — true incremental/cached "
+     "convolution (eliminating the ~50x redundancy entirely) is the actual complete "
+     "fix and hasn't been implemented yet."),
+
+    (35, "2026-09-16", "FIX",
+     "Amp output was a harsh, loud, high-pitched clipping/screeching noise with real "
+     "guitar signal barely audible underneath, reproduced and root-caused with a "
+     "synthetic pluck run through the exact loaded NAM+IR: NAM inference alone was "
+     "producing peak amplitudes of 20-48 from a normal 0.3-peak input (up to ~160x "
+     "gain excess on one capture), and the IR convolution stage was compounding that "
+     "further, up to 530 peak. Two fixes: (1) IRConv.load() now normalizes the "
+     "impulse response by its L1 norm (sum of |taps|) instead of peak amplitude — "
+     "peak-normalizing an IR that was exported quiet (~0.004 peak seen in the wild) "
+     "was inflating every tap by however much headroom that peak had, and for an IR "
+     "with energy spread across many taps that multiplies convolution gain well past "
+     "what the peak number alone suggests; L1 normalization guarantees "
+     "|output|_inf <= |input|_inf, so convolution alone can never amplify a bounded "
+     "signal. (2) A safety limiter (tanh soft-clip) now engages right after NAM "
+     "inference whenever its output peak exceeds 1.5 — silent for a correctly-"
+     "calibrated model, but stops a miscalibrated capture from reaching the final "
+     "hard clip as a shrieking near-square wave and from feeding a blown-up signal "
+     "into the IR convolution and the looper's recording. Verified end-to-end "
+     "through the real AmpProcessor._cb() callback: output peak dropped from ~530 "
+     "to 0.30, zero samples at the clip boundary. The underlying ~70-160x NAM gain "
+     "issue on this specific capture's architecture is still not fully root-caused "
+     "and may need further work; this limiter is a safety net, not a tone fix, for "
+     "whichever capture triggers it."),
+
+    (34, "2026-09-16", "FIX",
+     "START AMP could fail with 'Error opening Stream: Invalid sample rate "
+     "[PaErrorCode -9997]' on any device whose Windows-configured mix rate isn't "
+     "44100 Hz (confirmed live against a Behringer UMC 202HD set to 176400 Hz — "
+     "common on 192k-capable interfaces). Fix: when the resolved input/output device "
+     "is actually on the WASAPI host API, the stream now opens with "
+     "sd.WasapiSettings(auto_convert=True), letting Windows' shared-mode mixer do the "
+     "rate conversion — the DSP pipeline is untouched and still runs at SAMPLE_RATE "
+     "throughout. Host API is resolved per actual device (via sd.default.device for "
+     "'System default'), not from the I/O tab's Host API filter label, since that "
+     "filter doesn't control what 'System default' itself resolves to. Also fixed a "
+     "second bug this exposed: AmpProcessor.start() set self.running = True before "
+     "attempting to open the stream, so a failed start left the amp stuck "
+     "'running' with no actual stream — START AMP silently did nothing on retry "
+     "until the app was restarted. running is now only set True after the stream "
+     "opens successfully."),
+
+    (33, "2026-09-16", "FIX",
+     "Audio device dropdowns were listing every physical device once per PortAudio "
+     "host API (MME/DirectSound/WASAPI/WDM-KS) unfiltered, turning ~5-6 real devices "
+     "into 30-50 near-duplicate entries, with long/garbled WDM-KS names getting cut "
+     "off in the combobox. Added a Host API selector on the I/O & Levels tab, "
+     "defaulting to WASAPI whose names match Windows' own Sound Settings; the Output "
+     "dropdown now gets the same host-API filtering the Input dropdown always had. "
+     "list_inputs()/list_outputs() share one _list_devices() helper, take an optional "
+     "host_api filter, drop the meaningless numeric index prefix from labels, and "
+     "sanitize WDM-KS's raw kernel-streaming names (strips embedded driver paths, e.g. "
+     "'Headset (@System32...bthhfenum.sys,...;(soundcore  Q30))' becomes "
+     "'Headset (soundcore Q30)'). Confirmed via direct sd.query_hostapis(): this "
+     "PortAudio build has no ASIO host API at all — a missing ASIO interface (e.g. a "
+     "Behringer UMC) is a limitation of the standard sounddevice wheel, not something "
+     "togglable in-app; WDM-KS remains the practical low-latency alternative already "
+     "available here."),
+
+    (32, "2026-09-16", "FEATURE",
+     "Pedal chain is now reorderable. PedalChain.process() dispatches through a new "
+     "self.order list (default: Wah, Fuzz, Overdrive/Boost, Chorus/Flanger, Delay, "
+     "Reverb) instead of a hardcoded sequence — each effect's DSP moved into its own "
+     "_fx_*() method. Pedals tab: every reorderable section has a Move up/down control "
+     "showing its chain position; moving one re-packs the section frames to match. "
+     "Order persists across sessions via pedal_order in the session JSON. Mute stays a "
+     "global pre-chain kill switch, not part of the reorderable order."),
+
+    (31, "2026-09-16", "FEATURE",
+     "build_exe.py now copies SoloTone_User_Guide.docx into build/dist/ next to the .exe "
+     "after packaging — a plain sibling file, not embedded in the binary, so it opens "
+     "directly in Word without launching the app."),
+
+    (30, "2026-09-16", "FEATURE",
+     "App window/taskbar now shows the Tally Light mark instead of the default Tk icon. "
+     "Two PNG sizes (64/32px) are embedded as base64 directly in solotone.py — no extra "
+     "asset file needed — and set via iconphoto() in App.__init__. Applies whether run "
+     "from source or from the packaged .exe."),
+
+    (30, "2026-09-16", "FEATURE",
+     "Windows .exe packaging: build/build_exe.py runs PyInstaller (--onefile --windowed) "
+     "to produce build/dist/SoloTone-v<version>.exe, named and versioned from version.py "
+     "automatically. build/make_icon.py generates build/solotone.ico (multi-size) from the "
+     "Tally Light mark for the exe's icon. The website and build/ folder itself are "
+     "deliberately excluded from the bundle; nam/ and irs/ are still created next to the "
+     "exe on first launch, same as running from source."),
+
+    (30, "2026-09-16", "FIX",
+     "_APP_DIR (used for the nam/ and irs/ folders and file-dialog default locations) "
+     "resolved from __file__, which points inside PyInstaller's temporary extraction "
+     "folder in a packaged build and is wiped after exit — nam/irs and remembered file "
+     "paths silently reset every launch. Now resolves from sys.executable's folder when "
+     "frozen (sys.frozen), so they persist next to the .exe like they do next to the "
+     "source script."),
+
+    (29, "2026-09-15", "INTERNAL",
+     "Docs cross-referenced against the actual code and brought current. README.md "
+     "rewritten from its pre-rename MetroTune version to describe the full app "
+     "(amp/FX, Pedals tab, Looper, NAM/IR persistence, guitar tunings). "
+     "SoloTone_User_Guide.docx: added the entire Pedals tab (Wah/Fuzz/Overdrive/"
+     "Chorus-Flanger/Delay/Reverb, undocumented since build 21), added the guitar "
+     "tuning presets section (build 27), corrected the tuner detection floor from "
+     "60 Hz to 40 Hz (build 27 fix), noted NAM/IR path persistence (build 28), and "
+     "fixed stale four-tab/four-tool references to five."),
+
+    (28, "2026-09-14", "FEATURE",
+     "NAM and IR file paths now persist across sessions. Saved to session JSON on close, reloaded on launch. Missing files produce a single grouped warning. _load_nam_from_path() and _load_ir_from_path() extracted for programmatic loading."),
+
+    (27, "2026-09-14", "FEATURE",
+     "Guitar tuning presets: 14 presets (Standard, Eb, Drop D/C/B/A, Open G/D/E/A/C, "
+     "DADGAD, Double Drop D) with 6-string readout in tuner footer. Closest string "
+     "auto-highlighted green/yellow/red by cents offset."),
+
+    (27, "2026-09-14", "FIX",
+     "Lowered pitch detector fmin from 60 Hz to 40 Hz. Fixes unreliable detection "
+     "on Drop B1 (61.7 Hz) and Drop A1 (55 Hz) strings."),
+
+    (27, "2026-09-14", "CHANGE",
+     "Tuner footer expanded to two rows: top row retains gauge/note/controls/pitch-pipe, "
+     "bottom row adds tuning preset selector and 6-string box readout."),
+
+    (26, "2026-09-14", "FIX",
+     "NAM loader: default gated=False (not True) when the 'gated' key is absent. "
+     "A2 files use 'gating_mode' list instead of a bool 'gated' key. "
+     "The old default caused mid = 2*ch = 16 instead of ch = 8, making every "
+     "conv in every layer twice as wide and exhausting the weight array."),
+
+    (26, "2026-09-14", "FIX",
+     "NAM loader: activation field can now be a list of dicts "
+     "({'type':'LeakyReLU','negative_slope':0.01}) as used by A2 files, "
+     "not just a plain string. Per-element negative_slope is respected."),
+
+    (26, "2026-09-14", "FIX",
+     "SlimmableContainer unwrap: use config['submodels'] (list with max_value + model), "
+     "not config['model'] or config['models']. Weights live inside each submodel, "
+     "not at the top level. Selects highest max_value WaveNet submodel (8-channel full)."),
+
+    (26, "2026-09-14", "FIX",
+     "IR loader: 24-bit PCM WAV files (3-byte sample width) now load correctly. "
+     "Previously caused KeyError: 3. Also added 32-bit float WAV support."),
+
+    (25, "2026-09-13", "FEATURE",
+     "nam/ and irs/ folders created on first launch next to solotone.py. "
+     "File dialogs open to these folders by default."),
+
+    (24, "2026-09-13", "FIX",
+     "A2 streaming: added separate head history buffer (hbuf, head_rf-1 samples) "
+     "for the 16-sample head conv. Without it, each block was 15 samples short. "
+     "WaveNetNAM.fwd split into fwd_stack() + fwd_head() for two-stage streaming."),
+
+    (23, "2026-09-13", "FIX",
+     "NAM A2 support: kernel_sizes (plural list), per-layer head dict "
+     "{'out_channels','kernel_size','bias'}, gating_mode list, activation list-of-dicts, "
+     "bottleneck field. _WNBlock rewritten to handle both A1 and A2 schemas."),
+
+    (22, "2026-09-13", "REFACTOR",
+     "Redesigned UI: 5 tabs (I/O & Levels, Signal Chain, Pedals, Looper, Metronome) "
+     "replacing the old 4-tab layout. Tuner demoted to persistent footer strip. "
+     "Project renamed from MetroTune to SoloTone."),
+
+    (21, "2026-09-13", "FEATURE",
+     "Pedal chain tab (pre-NAM): Tuner Mute, Wah, Fuzz Face, Big Muff "
+     "(Full/Flat/Scoop tone), Tubescreamer, Clean Boost, Chorus, Flanger, "
+     "Delay (BPM-linked dotted-8th/quarter/half or manual), Schroeder Reverb."),
+
+    (20, "2026-09-13", "FEATURE",
+     "Looper tab: up to 10 layers, Manual and Auto modes, BPM-sync button, "
+     "progress bar, layer dot strip, layer list. Looper integrated into amp callback."),
+
+    (19, "2026-09-13", "FEATURE",
+     "Amp / FX processor: duplex audio stream, NAM WaveNet inference (numpy, no PyTorch), "
+     "5 IR slots with A/B toggle and user labels, 3-band EQ, noise gate, "
+     "input/output gain, xrun counter, latency display."),
+
+    (18, "2026-09-13", "FIX",
+     "Shared stream mode: Metronome and Tuner share the amp duplex stream when the amp "
+     "is running, avoiding device-conflict errors. Metronome uses pull() method called "
+     "from amp callback; Tuner uses feed() method for raw input."),
+
+    (17, "2026-09-13", "FIX",
+     "Slider recursion crash: ttk.Scale fires command on programmatic .set() calls. "
+     "Fixed with _updating guard flag in _scale() helper. All sliders use this wrapper."),
+
+    (16, "2026-09-13", "FEATURE",
+     "5 metronome sound kits synthesised in numpy: Classic Beep, Mechanical Click, "
+     "Wood Block, Cymbal & Crash (circular mix buffer so crash rings out naturally), "
+     "Digital Blip. Preview button."),
+
+    (15, "2026-09-13", "FEATURE",
+     "Chromatic tuner with autocorrelation pitch detection, cents needle gauge, "
+     "A4 calibration (430-450 Hz), Bb/Eb/F transposition, pitch pipe."),
+
+    (14, "2026-09-13", "FEATURE",
+     "Metronome: sample-accurate scheduling in audio callback, 30-250 BPM, "
+     "tap tempo, beats/measure 1-12, subdivisions, beat-light strip."),
+
+    (1,  "2026-09-13", "INTERNAL",
+     "Project initialised as MetroTune. Single-file Python/Tkinter desktop app."),
+]
+
+
+def changelog_summary(n=10):
+    """Return a formatted string of the n most recent changelog entries."""
+    lines = []
+    for build, date, cat, desc in CHANGELOG[:n]:
+        lines.append(f"  [{cat:8s}] build {build:>3d}  {date}  {desc[:80]}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    print(f"SoloTone  {VERSION_FULL}")
+    print(f"Build {BUILD}  |  {BUILD_DATE}  |  {STAGE.upper()}")
+    print("\nRecent changes:")
+    print(changelog_summary(10))

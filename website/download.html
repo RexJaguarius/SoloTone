@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Download — SoloTone</title>
+<meta name="description" content="Download SoloTone: a Windows build, plus macOS and Linux from source. Currently release candidate 1.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-tally" viewBox="0 0 120 120">
+      <path d="M22 58 V44 Q22 20 60 20 Q98 20 98 44 V58" fill="none" stroke="#adadad" stroke-width="6" stroke-linecap="round"/>
+      <rect x="14" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <rect x="90" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <circle cx="60" cy="66" r="30" fill="#202020" stroke="#adadad" stroke-width="3.5"/>
+      <path d="M40 62 Q46 54 52 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M68 62 Q74 54 80 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M46 78 Q60 90 74 78" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="98" cy="58" r="9" fill="#ff6b6b" opacity="0.2"/>
+      <circle cx="98" cy="58" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="site-header">
+  <a class="brand" href="index.html">
+    <svg class="brand-mark" viewBox="0 0 120 120"><use href="#i-tally"/></svg>
+    <span class="brand-word">SoloTone</span>
+  </a>
+  <nav class="site-nav">
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html" class="active">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</header>
+
+<main class="container">
+
+  <section style="padding-bottom:0">
+    <span class="eyebrow">Get SoloTone</span>
+    <h1 style="font-size:clamp(2.2rem,5.5vw,3.4rem); max-width:16ch; margin-top:10px;">
+      Free to try. Runs on your own machine.
+    </h1>
+    <p style="color:var(--muted); font-size:1.05rem; max-width:58ch; margin-top:14px;">
+      Release candidate 1 (v1.0.1-rc1). A standalone Windows build needs no Python install;
+      macOS and Linux run from source anywhere Python 3.10 or later is installed. Every build
+      is smoke-tested automatically on all three.
+    </p>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">Windows</span>
+      <h2>The packaged build</h2>
+    </div>
+    <div class="trust-grid">
+      <div class="trust-card">
+        <span class="eyebrow">Get it</span>
+        <p><a class="btn btn-primary" href="https://github.com/RexJaguarius/SoloTone/releases"
+          target="_blank" rel="noopener">Download from GitHub Releases</a></p>
+        <p style="margin-top:12px">Grab the <span class="code-line">SoloTone-v&hellip;-windows.zip</span>
+          from the newest release, unzip it anywhere, and run the
+          <span class="code-line">.exe</span> &mdash; no Python, nothing to install. The user
+          guide is in the zip.</p>
+      </div>
+      <div class="trust-card">
+        <span class="eyebrow">Heads up</span>
+        <p>The build isn't code-signed yet, so Windows SmartScreen may warn on first run.
+          Click <em>More info</em>, then <em>Run anyway</em>. A signed build and a one-click
+          installer are planned.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">macOS &amp; Linux</span>
+      <h2>From source &mdash; four steps, once</h2>
+    </div>
+    <div class="steps">
+      <div class="step"><div><h3>Install Python</h3>
+        <p>Version 3.10 or later, from <span class="code-line">python.org</span> if you don't
+          already have it.</p></div></div>
+      <div class="step"><div><h3>Get the source</h3>
+        <p>Clone <a href="https://github.com/RexJaguarius/SoloTone" target="_blank"
+          rel="noopener" style="text-decoration:underline">the repository</a> or download it as
+          a zip.</p></div></div>
+      <div class="step"><div><h3>Install the dependencies</h3>
+        <p><span class="code-line">pip install -r requirements.txt</span> &mdash; on Linux, first
+          <span class="code-line">sudo apt install libportaudio2 portaudio19-dev python3-tk</span>.</p></div></div>
+      <div class="step"><div><h3>Launch it</h3>
+        <p><span class="code-line">python solotone.py</span> &mdash; that's the whole rig, open
+          and ready.</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">Recording</span>
+      <h2>Getting SoloTone into a DAW</h2>
+    </div>
+    <p style="color:var(--muted); font-size:1.02rem; max-width:62ch; margin-bottom:18px;">
+      SoloTone doesn't have a plugin (VST/AU) version — it's a standalone app with its own
+      audio stream — but its output can still be routed into a DAW for recording, using a
+      free virtual audio mixer: <a href="https://vb-audio.com/Voicemeeter/" target="_blank"
+      rel="noopener" style="text-decoration:underline">VoiceMeeter</a>.
+    </p>
+    <div class="steps">
+      <div class="step">
+        <div>
+          <h3>Install VoiceMeeter</h3>
+          <p>Free, from VB-Audio. It creates virtual audio devices your DAW and SoloTone can
+            both see.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Set SoloTone's output</h3>
+          <p>On the I/O &amp; Levels tab, set Output to the VoiceMeeter virtual input instead
+            of your speakers/interface.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Fan it out to both places</h3>
+          <p>VoiceMeeter can send that same signal to your real speakers/headphones <em>and</em>
+            the virtual cable at once — so you keep low-latency monitoring while the DAW
+            records in parallel.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Record in your DAW</h3>
+          <p>Point your DAW's input at the matching VoiceMeeter virtual output and hit record.</p>
+        </div>
+      </div>
+    </div>
+    <p style="color:var(--muted); font-size:0.95rem; max-width:62ch; margin-top:14px;">
+      A simpler single-purpose loopback like VB-CABLE also works, but it won't give you
+      real-time monitoring the way VoiceMeeter's fan-out does — you'd only hear what the DAW
+      plays back, with its own added latency on top of SoloTone's.
+    </p>
+  </section>
+
+  <section>
+    <div class="trust-grid">
+      <div class="trust-card">
+        <span class="eyebrow">You'll need</span>
+        <p>A microphone or audio interface for the tuner and looper to hear you — your
+          laptop's built-in mic works to get started.</p>
+      </div>
+      <div class="trust-card">
+        <span class="eyebrow">You won't need</span>
+        <p>An account, a subscription, or an internet connection once it's installed.
+          SoloTone never phones home.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="cta-band">
+      <div>
+        <h2>Found a bug, or want something added?</h2>
+        <p>It's one person's evenings-and-weekends project &mdash; a real message reaches a real inbox.</p>
+      </div>
+      <a class="btn btn-primary" href="contact.html">Get in touch</a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <span>SoloTone — runs entirely on your machine.</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+  </nav>
+</footer>
+
+</body>
+</html>
