@@ -351,6 +351,10 @@ Layout: `solotone.py` (app/GUI), `pedals.py` (pedal-effects DSP),
 `nam_engine.py` (Neural Amp Modeler inference), `version.py` (version +
 changelog), `tests/`, `website/`, `build/` (Windows .exe packaging).
 
+## Support
+
+SoloTone is free to use. If it's useful to you, you can tip the developer on [Ko-fi](https://ko-fi.com/rexjaguarius).
+
 ## License
 
 SoloTone is source-available under the [PolyForm Shield License
