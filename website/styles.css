@@ -191,3 +191,12 @@ code, .code-line{
   .feature-row:nth-of-type(even) .feature-plate{ order: 0; }
   .feature-plate{ max-width: 200px; margin-inline:auto; }
 }
+
+/* ---------- support (Ko-fi) ---------- */
+.btn-support{ background: var(--accent-2); color: #2a0a0a; font-weight: 600; }
+.btn-support:hover{ transform: translateY(-1px); background: #ff8585; }
+.site-nav a.nav-support{
+  color: #2a0a0a; background: var(--accent-2); padding: 6px 14px; border-radius: 999px;
+  border-bottom: 0; font-weight: 600;
+}
+.site-nav a.nav-support:hover{ background: #ff8585; color: #2a0a0a; }
