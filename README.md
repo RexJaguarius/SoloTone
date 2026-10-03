@@ -299,6 +299,13 @@ requirements.txt` is usually all you need. macOS will prompt for
 microphone permission the first time you start the tuner — allow it in
 System Settings → Privacy & Security → Microphone.
 
+### Audio drivers: no ASIO
+SoloTone does not support ASIO. The PortAudio build bundled with
+`sounddevice` has no ASIO host API, so ASIO drivers (including ASIO4ALL or an
+interface's own ASIO driver) won't appear and aren't needed. On Windows pick
+your interface under **WASAPI** (the default) or **WDM-KS** in the Host API
+dropdown on the I/O & Levels tab.
+
 ## Recording into a DAW
 
 SoloTone doesn't have a plugin (VST/AU) version — it's a standalone app
