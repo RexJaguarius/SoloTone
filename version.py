@@ -6,8 +6,8 @@ Imported by solotone.py for display in the title bar and About dialog.
 """
 
 VERSION       = "1.0"           # Major.Minor — below 1.0 until first stable release
-BUILD         = 1               # Increments with every pushed change (reset to 1 at 1.0 RC1)
-BUILD_DATE    = "2026-10-02"
+BUILD         = 2               # Increments with every pushed change (reset to 1 at 1.0 RC1)
+BUILD_DATE    = "2026-10-03"
 STAGE         = "rc1"           # alpha | beta | rc1.. | release
 
 VERSION_FULL  = f"{VERSION}.{BUILD}-{STAGE}"   # e.g. "0.9.27-beta"
@@ -23,6 +23,29 @@ VERSION_TITLE = f"SoloTone  v{VERSION_FULL}"   # for the window title bar
 CHANGELOG = [
 
     # ── 1.0 release candidates ────────────────────────────────────────────────
+
+    (2, "2026-10-03", "FIX",
+     "First tester feedback on RC1, four items. (1) The tuner-input row "
+     "read 'Tuner input: Shares amp input when ...' (two colons, a stray "
+     "capital, split across a fixed-width label) and is now one sentence. "
+     "(2) Audio devices: a duplex stream can't span two audio APIs, but "
+     "under 'All host APIs' the Output list could offer outputs on a "
+     "different API than the chosen input, ending in a raw PortAudio "
+     "error. Choosing an input now limits the Output list to that input's "
+     "API, and Start Amp refuses a mismatch with a plain-language message. "
+     "Testing this exposed a second problem underneath it: under 'All host "
+     "APIs' the same device is listed once per API with an identical "
+     "name, and the app maps a selection back to a device by label, so the "
+     "choice was ambiguous (a WASAPI selection could silently resolve to "
+     "the DirectSound copy). Labels are now tagged with their API in that "
+     "mode. (3) Added a 'Get free .nam models' link next to the NAM "
+     "loader; no model is bundled because a redistributable capture needs "
+     "a license-clear source. (4) The UI font (DejaVu Sans Mono) is not "
+     "installed on Windows or macOS, so Tk silently substituted something "
+     "machine-dependent (Arial here); it is now resolved once at startup "
+     "to the first family that exists. Not done: ASIO support (the bundled "
+     "PortAudio has none; see the discussion of building our own). No "
+     "exe rebuild or release yet."),
 
     (1, "2026-10-02", "CHANGE",
      "Release Candidate 1 (v1.0.1-rc1). Version scheme reset from the "

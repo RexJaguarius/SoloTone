@@ -196,6 +196,24 @@ def _valid_hex_color(s):
     except ValueError:
         return False
 
+def _pick_ui_font():
+    """FF names a font that isn't installed on most machines (DejaVu Sans
+    Mono ships with many Linux distros, not Windows or macOS). Tk silently
+    substitutes something when a family is missing, and which something
+    varies by machine, which shifts every character-width-based layout.
+    Resolve it once at startup to the first family that actually exists, so
+    the substitution is explicit and consistent."""
+    global FF
+    try:
+        import tkinter.font as tkfont
+        fams = set(tkfont.families())
+    except Exception:
+        return
+    for cand in ('DejaVu Sans Mono', 'Arial', 'Helvetica', 'DejaVu Sans'):
+        if cand in fams:
+            FF = cand
+            return
+
 def _recompute_derived_theme():
     """(Re)derive PANEL/ACCENT_DARK/ACCENT_DIM from the current BG/ACCENT.
     Called once at import with the factory defaults, and again by
@@ -940,7 +958,12 @@ def _list_devices(kind, host_api=None):
             name = _clean_device_name(d['name'])
             if not _is_real_device_name(name):
                 continue
-            devs.append((i, name))
+            # Under "All host APIs" the same physical device is listed once
+            # per API with an identical name, and the app maps a selection
+            # back to a device by its label, so identical labels made the
+            # choice ambiguous. Tag each one with its API in that mode.
+            label = name if host_api else f"{name}  [{h.replace('Windows ', '')}]"
+            devs.append((i, label))
     except Exception:
         pass
     return devs
@@ -2270,6 +2293,7 @@ class App(tk.Tk):
     def __init__(self):
         global ACCENT, BG   # possibly overwritten below by a saved custom theme
         super().__init__()
+        _pick_ui_font()
         self.title(f'SoloTone  v{VERSION_FULL}')
         _set_app_icon(self)
         self.configure(bg=BG)
@@ -2972,6 +2996,7 @@ class App(tk.Tk):
                                         state='readonly', width=48,
                                         values=[l for _,l in self.amp_inputs])
         self.amp_in_box.pack(side='left', padx=4)
+        self.amp_in_box.bind('<<ComboboxSelected>>', self._input_changed)
         ttk.Button(r1, text='⟳', width=3,
                    command=self._refresh_devices).pack(side='left', padx=4)
 
@@ -2979,13 +3004,12 @@ class App(tk.Tk):
         self.t_inputs  = self.amp_inputs
         self.t_dev_var = tk.StringVar(value=self.amp_inputs[0][1])
         r1b = tk.Frame(dev_sec, bg=PANEL); r1b.pack(fill='x', padx=10, pady=2)
-        tk.Label(r1b, text='Tuner input:', bg=PANEL, fg=DIM,
-                 font=(FF,10), width=9).pack(side='left')
         tk.Label(r1b,
-                 text='Shares amp input when amp is running — or select separately:',
-                 bg=PANEL, fg=DIM, font=(FF,9)).pack(side='left', padx=4)
+                 text='Tuner input shares the amp input while the amp is running, '
+                      'or pick one separately:',
+                 bg=PANEL, fg=DIM, font=(FF,10)).pack(side='left')
         self.t_dev_box = ttk.Combobox(r1b, textvariable=self.t_dev_var,
-                                       state='readonly', width=30,
+                                       state='readonly', width=24,
                                        values=[l for _,l in self.t_inputs])
         self.t_dev_box.pack(side='left', padx=4)
         self.t_dev_box.bind('<<ComboboxSelected>>', self._tuner_dev_changed)
@@ -3077,10 +3101,26 @@ class App(tk.Tk):
             self.t_dev_var.set(self.t_inputs[0][1])
         self._tuner_dev_changed()
 
-        self.amp_out_devs = list_outputs(ha)
-        self.amp_out_box.configure(values=[l for _,l in self.amp_out_devs])
-        if self.amp_out_var.get() not in [l for _,l in self.amp_out_devs]:
-            self.amp_out_var.set(self.amp_out_devs[0][1])
+        self._input_changed()
+
+    def _input_changed(self, _=None):
+        """Rebuild the Output list. With a specific Host API selected both
+        lists already come from that one API. Under "All host APIs" they
+        don't, and a duplex stream can't span two APIs (PortAudio refuses
+        it), so once a real input device is chosen only outputs on the same
+        API are offered."""
+        ha = self._current_host_api()
+        outs = list_outputs(ha)
+        if ha is None:
+            in_dev = next((i for i, l in self.amp_inputs if l == self.amp_in_var.get()), None)
+            if in_dev is not None:
+                in_api = self._device_host_api(in_dev, True)
+                same = [(i, l) for i, l in outs if self._device_host_api(i, False) == in_api]
+                outs = same or outs
+        self.amp_out_devs = outs
+        self.amp_out_box.configure(values=[l for _, l in outs])
+        if self.amp_out_var.get() not in [l for _, l in outs]:
+            self.amp_out_var.set(outs[0][1])
 
     def _restore_saved_devices(self, s):
         """Audio device selections now persist across runs — but a saved
@@ -3108,6 +3148,7 @@ class App(tk.Tk):
                 var.set('System default')
 
         _restore_one(self.amp_in_var,  s.get('amp_input'),   self.amp_inputs)
+        self._input_changed()   # outputs depend on the restored input's API
         _restore_one(self.amp_out_var, s.get('amp_output'),  self.amp_out_devs)
         _restore_one(self.t_dev_var,   s.get('tuner_input'), self.t_inputs)
         self._tuner_dev_changed()
@@ -3168,6 +3209,14 @@ class App(tk.Tk):
             # per actual device rather than the Host API dropdown, because
             # "System default" (device=None) is PortAudio's own default and
             # may not be a WASAPI device at all regardless of that filter.
+            in_api  = self._device_host_api(in_dev,  True)
+            out_api = self._device_host_api(out_dev, False)
+            if in_api and out_api and in_api != out_api:
+                messagebox.showerror('Input and output use different audio APIs',
+                    f'The input is on {in_api} but the output is on {out_api}, and a '
+                    "single stream can't span two audio APIs.\n\nSet Host API to one "
+                    '(Windows WASAPI is a good default) and pick both devices from it.')
+                return
             in_extra  = sd.WasapiSettings(auto_convert=True) if self._device_host_api(in_dev,  True)  == 'Windows WASAPI' else None
             out_extra = sd.WasapiSettings(auto_convert=True) if self._device_host_api(out_dev, False) == 'Windows WASAPI' else None
             extra = (in_extra, out_extra) if (in_extra or out_extra) else None
@@ -3240,6 +3289,10 @@ class App(tk.Tk):
         self.nam_lbl.pack(side='left')
         ttk.Button(nam_row, text='Load .nam…', command=self._load_nam).pack(side='left', padx=4)
         ttk.Button(nam_row, text='Clear',      command=self._clear_nam).pack(side='left', padx=4)
+        get_nam = tk.Label(nam_row, text='Get free .nam models ↗', bg=PANEL, fg=ACCENT,
+                           font=(FF,10,'underline'), cursor='hand2')
+        get_nam.pack(side='left', padx=8)
+        get_nam.bind('<Button-1>', lambda e: __import__('webbrowser').open('https://tonehunt.org'))
         self.nam_on_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(nam_row, text='Enabled', variable=self.nam_on_var,
                         command=lambda: setattr(self.amp, 'nam_on', self.nam_on_var.get())
