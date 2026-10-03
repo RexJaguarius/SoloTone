@@ -946,6 +946,19 @@ def _list_devices(kind, host_api=None):
     or None for every host API (the old, noisy behavior)."""
     devs = [(None, 'System default')]
     if sd is None: return devs
+    if host_api:
+        # device=None means PortAudio's own default, which on Windows is the
+        # MME host API no matter which API this list is filtered to. That
+        # silently put "System default" on MME (high latency) while the
+        # dropdown said WASAPI. Resolve it to this API's own default device.
+        try:
+            key = 'default_input_device' if kind == 'input' else 'default_output_device'
+            for h in sd.query_hostapis():
+                if h['name'] == host_api and h.get(key, -1) is not None and h.get(key, -1) >= 0:
+                    devs = [(h[key], 'System default')]
+                    break
+        except Exception:
+            pass
     chan_key = 'max_input_channels' if kind == 'input' else 'max_output_channels'
     try:
         hostapis = sd.query_hostapis()
@@ -1383,6 +1396,11 @@ class MidiController:
             self.port_name = port_name
         except Exception:
             return False
+        self._open_output(port_name)
+        return True
+
+    def _open_output(self, port_name):
+        """Best-effort open of the matching output port (see below)."""
         # Output port for pad LED feedback — best-effort and entirely
         # optional. Most controllers are input-only as far as this app
         # is concerned, so a missing/failed output port never blocks the
@@ -1404,7 +1422,19 @@ class MidiController:
                 self.midi_out = midi_out
         except Exception:
             self.midi_out = None
-        return True
+        return self.midi_out is not None
+
+    def reopen_output(self):
+        """Drop and re-open the output port. A stale handle (device
+        re-plugged, driver hiccup) makes every later SysEx silently go
+        nowhere, which looked like the LPD8 LEDs being 'spotty'."""
+        if not HAS_MIDI or not self.port_name:
+            return False
+        if self.midi_out is not None:
+            try: self.midi_out.close_port()
+            except Exception: pass
+            self.midi_out = None
+        return self._open_output(self.port_name)
 
     def close(self):
         if self.midi_in is not None:
@@ -2432,6 +2462,7 @@ class App(tk.Tk):
         # Deferred via after() rather than run synchronously here — see
         # _auto_reconnect_midi()'s docstring for why.
         self.after(250, self._auto_reconnect_midi)
+        self.after(self.LPD8_RESEND_MS, self._lpd8_tick)
 
     # ── style ────────────────────────────────────────────────
 
@@ -3257,6 +3288,8 @@ class App(tk.Tk):
                 try:
                     li, lo = self.amp.stream.latency
                     lat = f'  {li*1000:.0f}ms in / {lo*1000:.0f}ms out'
+                    api = self._device_host_api(self.amp.stream.device[0], True)
+                    if api: lat += f'  [{api.replace("Windows ", "")}]'
                 except: pass
             xr  = self.amp.xruns
             col = '#ffd166' if xr else ACCENT
@@ -3575,6 +3608,7 @@ class App(tk.Tk):
                     pass
             self._refresh_midi_ui()
             self._save_midi_mappings()
+            self._lpd8_refresh_leds(force=True)   # pad->pedal mappings just changed
 
         if 'tuning' in data:
             self._restore_tuning(data['tuning'])
@@ -4411,6 +4445,10 @@ class App(tk.Tk):
 
     def _handle_midi_event(self, kind, number, value):
         key = ('cc', number) if kind == 'cc' else ('note', number)
+        try:
+            self._lpd8_refresh_leds(force=True)   # any pad/knob activity re-syncs the LEDs
+        except Exception:
+            pass
 
         if self._midi_learn_target is not None and kind in ('cc', 'note_on'):
             tid = self._midi_learn_target
@@ -4690,7 +4728,27 @@ class App(tk.Tk):
         if not force and colors == self._lpd8_last_colors:
             return
         self._lpd8_last_colors = colors
-        self.midi_ctrl.send_sysex(_lpd8_mk2_pad_color_sysex(colors))
+        msg = _lpd8_mk2_pad_color_sysex(colors)
+        if not self.midi_ctrl.send_sysex(msg):
+            # Send failed: the port handle may be stale. Reopen once, retry.
+            if self.midi_ctrl.reopen_output():
+                self.midi_ctrl.send_sysex(msg)
+
+    LPD8_RESEND_MS = 2000
+
+    def _lpd8_tick(self):
+        """Periodically re-send the pad colors, unconditionally, and
+        recover a lost output port. The LPD8 mk2's LEDs were spotty — a
+        dropped or ignored SysEx message otherwise leaves a pad wrong until
+        the next state change, and a re-plugged device leaves the old port
+        handle dead. The message is 56 bytes every couple of seconds."""
+        try:
+            if getattr(self, 'lpd8_led_var', None) and self.lpd8_led_var.get():
+                if self.midi_ctrl.midi_out is None and self.midi_ctrl.port_name:
+                    self.midi_ctrl.reopen_output()
+                self._lpd8_refresh_leds(force=True)
+        finally:
+            self.after(self.LPD8_RESEND_MS, self._lpd8_tick)
 
     # ── Keyboard keybinds ─────────────────────────────────────
     # Mirrors the MIDI Controller section just above: a generic "Learn"
@@ -5595,6 +5653,10 @@ class App(tk.Tk):
         for child in self._pedals_tab_root.winfo_children():
             child.destroy()
         self._tab_pedals(self._pedals_tab_root)
+        # The rebuilt tab makes fresh on/off variables whose initial values
+        # never fire the write-trace that normally refreshes the LPD8, so
+        # push the new state to the pads explicitly.
+        self._lpd8_refresh_leds(force=True)
 
     def _fx_reorder_row(self, parent, name):
         """Move up/down control at the top of a reorderable pedal section.

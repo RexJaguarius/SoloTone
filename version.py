@@ -6,7 +6,7 @@ Imported by solotone.py for display in the title bar and About dialog.
 """
 
 VERSION       = "1.0"           # Major.Minor — below 1.0 until first stable release
-BUILD         = 2               # Increments with every pushed change (reset to 1 at 1.0 RC1)
+BUILD         = 3               # Increments with every pushed change (reset to 1 at 1.0 RC1)
 BUILD_DATE    = "2026-10-03"
 STAGE         = "rc1"           # alpha | beta | rc1.. | release
 
@@ -23,6 +23,29 @@ VERSION_TITLE = f"SoloTone  v{VERSION_FULL}"   # for the window title bar
 CHANGELOG = [
 
     # ── 1.0 release candidates ────────────────────────────────────────────────
+
+    (3, "2026-10-03", "FIX",
+     "Three problems from hands-on use. (1) High latency from an "
+     "accidental non-WASAPI stream: the Host API dropdown defaulted to "
+     "WASAPI, but the first entry in every device list, 'System default', "
+     "was device=None, which means PortAudio's own default and on Windows "
+     "that is the MME host API regardless of the dropdown. The default "
+     "selection therefore ran on MME while the UI said WASAPI (build 1.0.2's "
+     "persistence made falling back to it more likely). 'System default' "
+     "now resolves to the selected API's own default device, and the "
+     "running status shows the API in use, e.g. '[WASAPI]'. Verified: the "
+     "default input and output both resolve to Windows WASAPI devices. "
+     "(2) Loading a Tone Profile did not update the LPD8: the Pedals tab "
+     "rebuild creates fresh on/off variables whose initial values never "
+     "fire the write-trace that refreshes the pads, and the profile's "
+     "pad-to-pedal mappings change without a refresh either. Both now "
+     "push the pad colors explicitly. (3) The LPD8 was spotty: a dropped "
+     "SysEx message left a pad wrong until the next state change, and a "
+     "stale output handle (re-plugged device) made every later message "
+     "vanish. The pad colors are now re-sent every 2 seconds and after any "
+     "MIDI activity, and a failed send reopens the output port and "
+     "retries; tested against the real LPD8 including simulating a dead "
+     "port handle. No exe rebuild or release yet."),
 
     (2, "2026-10-03", "FIX",
      "First tester feedback on RC1, four items. (1) The tuner-input row "
