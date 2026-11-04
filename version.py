@@ -6,8 +6,8 @@ Imported by solotone.py for display in the title bar and About dialog.
 """
 
 VERSION       = "1.0"           # Major.Minor — below 1.0 until first stable release
-BUILD         = 3               # Increments with every pushed change (reset to 1 at 1.0 RC1)
-BUILD_DATE    = "2026-10-03"
+BUILD         = 5               # Increments with every pushed change (reset to 1 at 1.0 RC1)
+BUILD_DATE    = "2026-11-04"
 STAGE         = "rc1"           # alpha | beta | rc1.. | release
 
 VERSION_FULL  = f"{VERSION}.{BUILD}-{STAGE}"   # e.g. "0.9.27-beta"
@@ -23,6 +23,86 @@ VERSION_TITLE = f"SoloTone  v{VERSION_FULL}"   # for the window title bar
 CHANGELOG = [
 
     # ── 1.0 release candidates ────────────────────────────────────────────────
+
+    (5, "2026-11-04", "FEATURE",
+     "Recording, re-amping, Master Volume, level matching, profile notes. "
+     "(1) A REC button, timer and live peak meter in the footer of every "
+     "tab records a take as two mono 32-bit float WAVs - the processed "
+     "sound ('(wet)') and, optionally, the raw dry input ('(dry)') - "
+     "sample-aligned and named 'Profile - date time'. The tap is after "
+     "Output Gain but before Master Volume and the metronome, so neither the "
+     "monitoring level nor the click ends up in the file; the looper is an "
+     "opt-in checkbox. The audio callback only copies blocks into a bounded "
+     "queue and a writer thread does the disk work, so recording can't "
+     "glitch the audio, and the WAV header is re-patched each second so even "
+     "a crashed take opens. The first take asks for a folder (default "
+     "Documents/SoloTone Recordings). Record Start/Stop is a MIDI/keybind "
+     "target and lights its pad. (2) A Record tab lists the session's takes "
+     "(Open wet / Open dry / Show in folder) and re-amps any WAV - any "
+     "sample rate, bit depth, mono or stereo - through the current sound "
+     "faster than real time, saving '<name> - <profile>.wav' next to it "
+     "with a tail for reverb/delay and an optional input-peak normalize. "
+     "(3) A global Master Volume (-40..+6 dB, saved in the session, never "
+     "in a profile, MIDI-mappable). (4) 'Match level' renders a synthetic "
+     "playing signal through the whole chain offline and sets Output Gain "
+     "so every profile lands at -18 dBFS RMS; Output Gain now spans "
+     "-24..+42 dB because quiet amp captures behind an L1-normalized cab IR "
+     "can need 40 dB. (5) Tone Profiles carry a Notes field (pickup, knob "
+     "settings, tips) shown under the Save/Load buttons. The offline chain "
+     "that does (2) and (4) is a GUI-free OfflineChain that mirrors the "
+     "audio callback, so what is rendered is what is heard."),
+
+    (5, "2026-11-04", "FIX",
+     "Noise gate opened over most of a second and closed over many "
+     "seconds. Its 3 ms open / 60 ms close were per-sample coefficients "
+     "applied once per audio block, so every sound swelled in after you "
+     "started playing and the gate effectively never closed. The "
+     "coefficients are now derived from the block length (gate_step()) with "
+     "a per-sample ramp across the block, shared by the live callback, "
+     "level matching and re-amp. Audible effect: sounds are at full level "
+     "from the first note and a threshold now really gates quiet tails."),
+
+    (5, "2026-11-04", "FIX",
+     "Tuner: quiet pickups (e.g. a Telecaster) were not detected, and "
+     "chromatic readings flickered through notes you weren't playing. The "
+     "detector ignored any input below -44 dBFS RMS, which a low-output "
+     "pickup sits under for most of a note; it is now McLeod's normalized "
+     "square-difference method (loudness-independent, first strong peak so "
+     "a weak fundamental isn't reported an octave up). Mains hum (50/60 Hz "
+     "and harmonics) is subtracted before detecting, which keeps hum from "
+     "out-shouting a quiet note, and a weak steady pitch sitting on a mains "
+     "frequency is rejected as hum. On synthetic plucks the old detector "
+     "found nothing at or below -50 dBFS; the new one finds about 97% down "
+     "to -66 dBFS, and reports nothing for silence, noise or hum alone. "
+     "With a tuning selected the reading now snaps to that tuning's strings "
+     "(octave-insensitive, so an octave error can't show the wrong string; "
+     "flat names for Eb standard), the search range is limited to what the "
+     "tuning can produce, and a different string only takes over after "
+     "three consecutive readings. 'None (chromatic)' behaves as before. "
+     "Also fixed the string number shown for 4-string bass."),
+
+    (4, "2026-10-25", "FEATURE",
+     "Post-amp effects. Until now the whole pedal chain ran ahead of the "
+     "NAM amp, which is right for drive/fuzz/wah/compressor but wrong for "
+     "time-based effects: on a real rig delay, reverb and often chorus sit "
+     "after the amp (effects loop or board), and run ahead of a distorted "
+     "amp their repeats and tails get compressed and smeared along with the "
+     "notes. The chain order now contains an 'amp' marker: pedals before "
+     "it run ahead of the amp as before (PedalChain.process), pedals after "
+     "it run on the amp + cab + EQ output (PedalChain.process_post, called "
+     "from the audio callback between the EQ and the looper, so a recorded "
+     "loop still includes them). The new factory order is Compressor, Wah, "
+     "Fuzz, Distortion, Overdrive, AMP, Chorus, Delay, Reverb. Each pedal's "
+     "section has a 'Move post-amp / Move pre-amp' button, Move up/down now "
+     "walk across the amp marker, and the Pedal Status strip shows an AMP "
+     "block in the chain with every pedal tagged PRE-AMP or POST-AMP. "
+     "Mute silences both stages. Saved profiles and sessions without the "
+     "marker keep every pedal ahead of the amp, so they sound exactly as "
+     "they always did; only an untouched factory order is upgraded to the "
+     "new default. Measured on the Orange OR30 model: a 50% delay ahead of "
+     "the amp came out 3.4 dB LOUDER than the note that fed it (the amp's "
+     "compression), after the amp it sits at the level the mix knob says. "
+     "New tests cover the stage split, mute, and order migration."),
 
     (3, "2026-10-03", "FIX",
      "Three problems from hands-on use. (1) High latency from an "

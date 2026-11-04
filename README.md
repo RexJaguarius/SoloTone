@@ -55,7 +55,16 @@ network access.
   on launch, and the Load NAM/Load IR dialogs remember the last folder
   browsed instead of always resetting to the bundled `nam/`/`irs/` folders
 
-**Pedals** (pre-amp effects chain)
+- **Master Volume** — a global output trim (-40 to +6 dB) saved with the
+  session, never with a Tone Profile, so loading a profile can't change
+  how loud your monitors are; mappable to a MIDI knob
+- **Match level** — renders a synthetic playing signal through the whole
+  chain offline (pedals, NAM, cab IR, EQ) and sets Output Gain so every
+  profile lands at -18 dBFS RMS, taking out the huge volume differences
+  between amp captures. Output Gain spans -24 to +42 dB for the quietest
+  captures
+
+**Pedals** (effects chain, before and after the amp)
 - Tuner Mute
 - **Compressor** (tube-style) — Threshold/Ratio/Attack/Release/Makeup gain
   with a soft-knee gain curve, plus a Warmth control that blends in
@@ -85,19 +94,25 @@ network access.
   locked inside whichever one it was saved in. Loading refuses a preset
   saved for a different pedal rather than silently applying the wrong
   fields
-- **Reorderable chain** — Move up/down controls on each pedal let you
-  restack the signal order (e.g. fuzz before wah vs. after) instead of a
-  fixed sequence; the order persists across sessions. A **Reset to
-  Default Order** button restores the factory sequence (Compressor →
-  Wah → Fuzz → Distortion → Overdrive → Chorus/Flanger → Delay → Reverb)
-  in one click
+- **Reorderable chain, before and after the amp** — Move up/down controls
+  on each pedal let you restack the signal order (e.g. fuzz before wah vs.
+  after); the order persists across sessions. The chain has an **AMP**
+  marker for where the NAM amp, cab IR and EQ sit: pedals before it feed
+  the amp (compressor, wah, fuzz, distortion, overdrive), pedals after it
+  run on the amp's output (chorus, delay, reverb — so repeats and tails
+  aren't crushed by a distorted amp). Each pedal has a **Move post-amp /
+  Move pre-amp** button. A **Reset to Default Order** button restores the
+  factory sequence (Compressor → Wah → Fuzz → Distortion → Overdrive →
+  AMP → Chorus/Flanger → Delay → Reverb) in one click. Profiles saved
+  before this existed keep every pedal ahead of the amp, so they sound
+  exactly as they did
 - **One pedal's controls open at a time** — each pedal's section
   expands/collapses like an accordion: opening one closes whichever
   other was open, so the tab doesn't turn into a long scroll of every
   pedal's controls at once. Compressor is open by default; which pedal
   is open persists across sessions like everything else in Settings
 - **Pedal Status strip** — a row of small icons at the top of the tab,
-  one per pedal in the current chain order, each with an LED dot that
+  one per pedal in the current chain order (with an AMP block marking where the amp sits, and each pedal tagged PRE-AMP or POST-AMP), each with an LED dot that
   lights up **red** when that pedal is on (fixed, regardless of the
   app's accent color — see Appearance). Click most of an icon to jump
   straight to that pedal's own section below, expanding it if it was
@@ -113,6 +128,8 @@ network access.
   controller mappings for the pedals, 5-band EQ + Level, noise gate
   threshold, input/output gain, hum filter, and the guitar/bass tuning
   preset
+- A **Notes** box under the Save/Load buttons is saved with the profile —
+  pickup position, guitar volume/tone settings, playing tips
 - Stored as JSON with its own `.stprofile` extension, in their own
   `profiles/` folder (alongside `nam/` and `irs/`) — built to extend, with
   a format-version number separate from the app version
@@ -141,6 +158,23 @@ network access.
   volume) — both write standard 16-bit PCM WAV files any DAW can open
 - Integrated directly into the amp's audio callback — no separate stream
 
+**Recording & Re-amp** (REC strip in the footer of every tab, Record tab)
+- One click records a take as **two mono 32-bit float WAVs**: the
+  processed sound and (optionally) the raw dry guitar, sample-aligned,
+  that open straight in Audacity, Audition or any DAW
+- Taken after Output Gain but before Master Volume and the metronome, so
+  the click and your monitoring level are never in the file; looper
+  playback is an opt-in checkbox
+- Live peak meter with a clip warning, a timer, and Open / Show-in-folder
+  buttons; asks for a save folder the first time (default
+  `Documents/SoloTone Recordings`). Record Start/Stop is mappable to a MIDI
+  pad/footswitch or a key
+- Disk writing happens on its own thread, so recording can't cause audio
+  dropouts; a take cut short by a crash is still a valid file
+- **Re-amp** any WAV (any sample rate or bit depth, mono or stereo) through
+  the current amp, cab, EQ and pedals, faster than real time, saved next to
+  the source with a tail so reverb and delay finish
+
 **Metronome**
 - Tempo 30–250 BPM, via +/- buttons, a slider, or **tap tempo**
 - Selectable beats-per-measure (1–12) with the downbeat visually accented
@@ -161,9 +195,11 @@ network access.
   timing doesn't drift the way a `sleep()`-based loop would)
 
 **Tuner** (persistent footer strip, visible on every tab)
-- Real-time chromatic pitch detection from your microphone or the amp's
-  raw input (autocorrelation with parabolic interpolation for sub-cent
-  precision), tracking as low as ~40 Hz in Guitar mode
+- Real-time pitch detection from your microphone or the amp's raw input
+  (normalized square-difference method with parabolic interpolation for
+  sub-cent precision), tracking as low as ~40 Hz in Guitar mode. It judges
+  how periodic the signal is, not how loud, so low-output pickups work, and
+  it subtracts 50/60 Hz mains hum before detecting
 - Large note + octave display, frequency readout, and a sweeping cents
   needle gauge (±50 cents)
 - Adjustable A4 calibration, 430–450 Hz
@@ -171,8 +207,11 @@ network access.
 - Built-in reference-tone generator (pitch pipe) for all 12 notes
 - **Guitar tuning presets** — 14 built-in tunings (Standard, Eb/D
   standard, Drop D/C/B/A, Open G/D/E/A/C, DADGAD, Double Drop D) with a
-  string readout that auto-highlights the closest string by cents offset
-  (accent color in tune, amber close, red off)
+  string readout. With a tuning selected the note display **snaps to that
+  tuning's strings** — play E and it shows E2 and how many cents off, not
+  every sharp and flat — and only switches strings after a steady reading.
+  Pick **None (chromatic)** for the raw nearest note (accent color in
+  tune, amber close, red off)
 - **Panic** — a button in the footer's bottom row (and a keybind/MIDI
   target, mappable like anything else) that immediately silences all
   output — the live signal, the looper's own already-playing-back loop
@@ -318,6 +357,12 @@ DAW for recording:
    input the mixer/cable exposes.
 3. In your DAW, record from the matching virtual output device.
 
+Prefer not to route audio at all? SoloTone also has its own **Record**
+button (footer, every tab): it saves the processed sound and a dry copy as
+WAV files that open directly in your DAW — see Recording & Re-amp above.
+The virtual-cable route above is only needed to record SoloTone live
+*into* a DAW track.
+
 Plain VB-CABLE alone removes your live monitoring, since its virtual
 output makes no sound — VoiceMeeter avoids that by fanning one output to
 both your real speakers/headphones (for low-latency monitoring straight
@@ -325,7 +370,7 @@ from SoloTone) and the virtual cable feeding the DAW at the same time.
 
 ## Notes on accuracy
 
-- The tuner uses time-domain autocorrelation, which works well for
+- The tuner uses time-domain pitch detection, which works well for
   monophonic input (a single guitar/bass string, a sung or played note).
   Chords or heavy background noise will confuse it, same as with hardware
   clip-on tuners.

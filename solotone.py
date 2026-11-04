@@ -22,7 +22,7 @@ except ImportError:
     VERSION_FULL = 'unknown'
     CHANGELOG = []
 from nam_engine import NamLoadError, load_nam
-from pedals import PedalChain, DEFAULT_PEDAL_ORDER
+from pedals import PedalChain, DEFAULT_PEDAL_ORDER, AMP_MARKER, normalize_order
 import queue
 import threading
 import time
@@ -139,6 +139,32 @@ def closest_string(freq_hz, tuning_midi, a4=440.0):
             best_dist = dist; best_idx = i
     cents = (midi_detected - tuning_midi[best_idx]) * 100.0
     return best_idx, cents
+def closest_string_folded(freq_hz, tuning_midi, a4=440.0):
+    """Return (string_index, cents_off) for the string whose NOTE is closest
+    to freq_hz, ignoring octave. Octave errors are the commonest pitch-
+    detection mistake on a low string, and for tuning they don't matter —
+    a flat A is a flat A in any octave — so the match is made on the note
+    alone (cents_off is then within +-600) and the string's actual octave
+    only breaks ties between strings sharing a note, preferring the lower
+    string. Returns (None, 0.0) when there is no pitch or no tuning."""
+    if freq_hz is None or not tuning_midi:
+        return None, 0.0
+    m = 69 + 12 * math.log2(freq_hz / a4)
+    best = None
+    for i, target in enumerate(tuning_midi):
+        d = (m - target + 6.0) % 12.0 - 6.0            # semitones off, -6..+6
+        key = (round(abs(d), 2), abs(m - target), i)
+        if best is None or key < best[0]:
+            best = (key, i, d)
+    return best[1], best[2] * 100.0
+
+def tuning_search_range(tuning_midi, a4=440.0):
+    """(fmin, fmax) worth searching for a tuning: a little below its lowest
+    string (a whole step flat) to well above its highest. Anything outside
+    is a harmonic or noise, never a string being tuned."""
+    f = lambda m: a4 * 2 ** ((m - 69) / 12.0)
+    return max(20.0, 0.8 * f(min(tuning_midi))), 1.45 * f(max(tuning_midi))
+
 # DEFAULT_ACCENT/DEFAULT_BG are the factory theme, used by the Settings
 # tab's Appearance section "Reset to defaults" button. ACCENT/BG (and
 # PANEL/ACCENT_DARK/ACCENT_DIM, derived from them — see
@@ -339,28 +365,106 @@ def build_kit(name):
 # Pitch helpers
 # ─────────────────────────────────────────────────────────────
 
-def autocorrelate_pitch(signal, sr, fmin=40.0, fmax=1500.0):
-    signal = signal.astype(np.float64) - np.mean(signal)
-    if np.sqrt(np.mean(signal**2)) < 0.006:
+# Mains hum (and its harmonics) can look like a perfectly clean, steady note
+# at the level of a quiet pickup's signal, so a weak "pitch" sitting on one
+# of these frequencies is treated as hum rather than playing.
+MAINS_HUM_HZ = [h * k for h in (50.0, 60.0) for k in (1, 2, 3, 4)]
+HUM_LEVEL_RMS = 0.004      # above ~ -48 dBFS RMS it's playing, whatever the pitch
+
+_HUM_PROJ_CACHE = {}
+
+def remove_mains_hum(x, base_hz=60.0, sr=SAMPLE_RATE, harmonics=4):
+    """Subtract the mains hum (base_hz and its first harmonics) from a
+    block by least-squares fitting a sine and cosine at each frequency and
+    removing them. Hum is a steady sinusoid, so this takes it out almost
+    completely while barely touching a guitar's partials, which are not
+    locked to the mains frequency — it is what keeps a quiet single-coil
+    pickup's hum from out-shouting the note being tuned."""
+    x = np.asarray(x, dtype=np.float64)
+    n = len(x)
+    key = (n, round(float(base_hz), 3), int(sr), harmonics)
+    pinv = _HUM_PROJ_CACHE.get(key)
+    if pinv is None:
+        t = np.arange(n) / float(sr)
+        cols = []
+        for k in range(1, harmonics + 1):
+            w = 2.0 * np.pi * base_hz * k * t
+            cols += [np.sin(w), np.cos(w)]
+        basis = np.stack(cols + [np.ones(n)], axis=1)        # plus DC
+        pinv = (np.linalg.pinv(basis), basis)
+        if len(_HUM_PROJ_CACHE) > 8:
+            _HUM_PROJ_CACHE.clear()
+        _HUM_PROJ_CACHE[key] = pinv
+    pi, basis = pinv
+    return (x - basis @ (pi @ x)).astype(np.float32)
+
+def _near_mains_hum(f, tol_hz=1.5):
+    return any(abs(f - h) <= tol_hz for h in MAINS_HUM_HZ)
+
+def autocorrelate_pitch(signal, sr, fmin=40.0, fmax=1500.0,
+                        min_rms=2e-4, clarity=0.5, first_peak=0.9):
+    """Fundamental frequency of a plucked string, or None if there is no
+    clear pitch. McLeod's normalized square-difference method: the
+    autocorrelation is divided by the signal's own energy at each lag, so
+    how LOUD the note is never matters — only how periodic it is. (The
+    previous version also gated on an absolute level of -44 dBFS RMS,
+    which is above a low-output pickup's signal for most of a note.) The
+    first strong peak is taken rather than the tallest, which is what
+    stops a weak fundamental from being reported an octave up.
+    `min_rms` is only a floor against digital silence."""
+    x = np.asarray(signal, dtype=np.float64)
+    x = x - x.mean()
+    n = len(x)
+    rms = float(np.sqrt(np.mean(x * x)))
+    if rms < min_rms:
         return None
-    windowed = signal * np.hanning(len(signal))
-    corr = np.correlate(windowed, windowed, mode='full')
-    corr = corr[len(corr)//2:]
-    if corr[0] <= 0:
+    lo = max(2, int(sr / fmax))
+    hi = min(n // 2, int(math.ceil(sr / fmin)) + 1)
+    if hi <= lo + 2:
         return None
-    lo, hi = max(1, int(sr/fmax)), min(len(corr)-2, int(sr/fmin))
-    if hi <= lo:
+    nfft = 1 << (2 * n - 1).bit_length()
+    X = np.fft.rfft(x, nfft)
+    r = np.fft.irfft(X * np.conj(X), nfft)[:hi + 1]
+    cs = np.concatenate(([0.0], np.cumsum(x * x)))
+    taus = np.arange(hi + 1)
+    m = cs[n - taus] + (cs[n] - cs[taus])
+    nsdf = np.where(m > 1e-18, 2.0 * r / np.maximum(m, 1e-18), 0.0)
+
+    # Skip the zero-lag lobe (it is always ~1), then take the highest point
+    # of every positive lobe as a candidate period.
+    neg = np.nonzero(nsdf[1:] <= 0.0)[0]
+    if len(neg) == 0:
         return None
-    peak = int(np.argmax(corr[lo:hi])) + lo
-    if corr[peak] / corr[0] < 0.3:
+    t = max(int(neg[0]) + 1, lo)
+    peaks = []                       # (lag, value)
+    while t < hi:
+        if nsdf[t] > 0.0:
+            best_t, best_v = t, nsdf[t]
+            while t < hi and nsdf[t] > 0.0:
+                if nsdf[t] > best_v:
+                    best_t, best_v = t, nsdf[t]
+                t += 1
+            if 1 <= best_t < hi:
+                peaks.append((best_t, float(best_v)))
+        else:
+            t += 1
+    if not peaks:
         return None
-    a, b, c = corr[peak-1], corr[peak], corr[peak+1]
-    denom = a - 2*b + c
-    lag = peak + (0.5*(a-c)/denom if denom != 0 else 0.0)
-    if lag <= 0:
+    top = max(v for _, v in peaks)
+    lag, val = next((tt, v) for tt, v in peaks if v >= first_peak * top)
+    if val < clarity:
         return None
-    f = sr / lag
-    return f if fmin <= f <= fmax else None
+    a_, b_, c_ = nsdf[lag - 1], nsdf[lag], nsdf[lag + 1]
+    denom = a_ - 2 * b_ + c_
+    lag_f = lag + (0.5 * (a_ - c_) / denom if denom != 0 else 0.0)
+    if lag_f <= 0:
+        return None
+    f = sr / lag_f
+    if not (fmin <= f <= fmax):
+        return None
+    if rms < HUM_LEVEL_RMS and _near_mains_hum(f):
+        return None
+    return f
 
 def analyze_pitch(freq, a4=440.0, transpose=0):
     if not freq:
@@ -633,10 +737,10 @@ def write_wav_mono(path, arr, sr=SAMPLE_RATE):
         wf.writeframes(pcm.tobytes())
 
 
-def load_ir(path):
-    """Load a WAV file as an impulse response. Returns (ir_array, name).
-    Supports 8/16/24/32-bit integer PCM and 32/64-bit float WAV, including
-    WAVE_FORMAT_EXTENSIBLE headers."""
+def _decode_wav(path):
+    """Decode a WAV file to (interleaved float64 samples, channels, sample
+    rate). Supports 8/16/24/32-bit integer PCM and 32/64-bit float WAV,
+    including WAVE_FORMAT_EXTENSIBLE headers."""
     fmt_tag, nch, sr, bits, raw = _read_wav_raw(path)
     sw = bits // 8
     total_samples = len(raw) // sw
@@ -673,6 +777,12 @@ def load_ir(path):
         raise ValueError(f"Unsupported WAV format code: {fmt_tag} "
                          f"(only integer PCM and IEEE float are supported)")
 
+    return arr, nch, sr
+
+def load_ir(path):
+    """Load a WAV file as an impulse response. Returns (ir_array, name)."""
+    arr, nch, sr = _decode_wav(path)
+
     # Take left channel only if stereo/multi-channel
     if nch > 1:
         arr = arr[::nch]
@@ -685,6 +795,384 @@ def load_ir(path):
 
     name = os.path.splitext(os.path.basename(path))[0]
     return arr.astype(np.float32), name
+
+# Noise gate smoothing: how fast it opens when the signal rises above the
+# threshold and closes when it falls below. These are time constants, so the
+# per-block coefficient is derived from the block length — a per-sample
+# coefficient applied once per block (as this used to be) stretches the 3 ms
+# open into most of a second and the 60 ms close into many seconds.
+GATE_ATTACK_S  = 0.003
+GATE_RELEASE_S = 0.060
+
+def gate_step(att, is_open, frames, sr=SAMPLE_RATE):
+    """Advance the gate's smoothed gain by one block. Returns (new_att,
+    ramp) where `ramp` is the per-sample gain to multiply the block by,
+    sliding from the old value to the new one so block edges don't click."""
+    tau = GATE_ATTACK_S if is_open else GATE_RELEASE_S
+    new = att + (1.0 - math.exp(-frames / (sr * tau))) * ((1.0 if is_open else 0.0) - att)
+    return new, np.linspace(att, new, frames, dtype=np.float32)
+
+# ─────────────────────────────────────────────────────────────
+# Level matching — measure a profile's loudness offline
+# ─────────────────────────────────────────────────────────────
+
+# RMS level (dBFS) that "Match level" aims every profile's output at.
+LEVEL_MATCH_TARGET_DB = -18.0
+# Output peaks are kept at least this far under full scale when matching,
+# so a profile that is quiet but spiky isn't pushed into the final clip.
+LEVEL_MATCH_PEAK_CEIL_DB = -1.0
+# Slider range of Output Gain, which match results are clamped to. Wide on
+# the top end because a quiet amp capture behind an L1-normalized cab IR can
+# land 40+ dB under a hotter one; the gain is applied after the cab, so it
+# scales signal and noise together and costs nothing in signal-to-noise.
+OUT_GAIN_RANGE_DB = (-24.0, 42.0)
+# Master Volume slider range (global, not saved in profiles).
+MASTER_RANGE_DB = (-40.0, 6.0)
+
+def _pluck_chord(freqs, seconds, sr=SAMPLE_RATE, strum=0.012, peak=0.25):
+    """Karplus-Strong plucked-string chord, strummed, normalized to `peak`
+    — a stand-in for a guitar signal at a typical interface input level."""
+    n_total = int(seconds * sr)
+    out = np.zeros(n_total, dtype=np.float64)
+    rng = np.random.default_rng(7)         # fixed seed: measurements repeat
+    for k, f in enumerate(freqs):
+        n = int(round(sr / f))
+        buf = rng.uniform(-1.0, 1.0, n)
+        y = np.empty(n_total)
+        pos = 0
+        while pos < n_total:
+            m = min(n, n_total - pos)
+            y[pos:pos + m] = buf[:m]
+            buf = 0.4985 * (buf + np.roll(buf, 1))
+            pos += n
+        off = int(k * strum * sr)
+        out[off:] += y[:n_total - off]
+    out *= peak / max(1e-9, float(np.max(np.abs(out))))
+    return out.astype(np.float32)
+
+class OfflineChain:
+    """A private, GUI-free copy of the whole signal chain described by a
+    profile dict — hum filter, pre-amp pedals, input gain, noise gate, NAM,
+    cab IR, EQ, post-amp pedals — fed block by block, in the same order as
+    AmpProcessor._cb. Output Gain is NOT applied (callers do that), so one
+    chain serves both level matching and re-amping. It owns all its state,
+    so it never touches the live audio stream."""
+    def __init__(self, data, sr=SAMPLE_RATE):
+        pd = data.get('pedals', {})
+        self.pedals = PedalChain(sr)
+        order = normalize_order(pd.get('order'))
+        if order is not None:
+            self.pedals.order = order
+        for f in PEDAL_PROFILE_FIELDS:
+            if f != 'order' and f in pd:
+                setattr(self.pedals, f, pd[f])
+        self.pedals.mute = False
+
+        self.hum = HumFilter(sr)
+        self.hum.on = bool(data.get('hum_on', False))
+        self.hum.set_base(float(data.get('hum_base_hz', 60.0)))
+
+        self.nam = None
+        nam_path = data.get('nam_path')
+        if nam_path and os.path.exists(nam_path):
+            self.nam, _ = load_nam(nam_path)
+        self.ir = None
+        ir_paths = data.get('ir_paths') or []
+        ir_active = data.get('ir_active', -1)
+        if (isinstance(ir_active, int) and 0 <= ir_active < len(ir_paths)
+                and ir_paths[ir_active] and os.path.exists(ir_paths[ir_active])):
+            self.ir = IRConv()
+            self.ir.load(load_ir(ir_paths[ir_active])[0])
+        self.eq = None
+        if data.get('eq_on', True):
+            self.eq = BiquadState(sr)
+            for i, g in enumerate(data.get('eq_band_gains', [])[:len(self.eq.bands)]):
+                self.eq.set_gain(i, float(g))
+            self.eq.set_level(float(data.get('eq_level', 0.0)))
+
+        self.in_gain  = float(data.get('in_gain', 1.0))
+        self.gate_thr = max(1e-9, float(data.get('gate_threshold', 0.01)))
+        self.sr = sr
+        self._gate_att = 0.0
+
+    def process(self, raw, bpm=120):
+        """One block of mono float32 in, one block out (same length)."""
+        n = len(raw)
+        x = self.hum.process(np.ascontiguousarray(raw, dtype=np.float32))
+        x = self.pedals.process(x, metro_bpm=bpm)
+        x = x * self.in_gain
+        self._gate_att, ramp = gate_step(self._gate_att,
+                                         float(np.sqrt(np.mean(x ** 2))) >= self.gate_thr, n, self.sr)
+        x = x * ramp
+        if self.nam is not None:
+            x = self.nam.process(x)
+            p = float(np.max(np.abs(x))) if x.size else 0.0
+            if p > 1.5:
+                x = np.tanh(x / p)
+        if self.ir is not None:
+            x = self.ir.process(x)
+        if self.eq is not None:
+            x = self.eq.process(x)
+        x = self.pedals.process_post(x, metro_bpm=bpm)
+        return np.asarray(x, dtype=np.float32)[:n]
+
+def measure_profile_level(data, sr=SAMPLE_RATE, block=512):
+    """Run a synthetic playing signal (two chords and a single note)
+    through the whole signal chain described by a profile dict and return
+    (rms_db, peak_db) of the result BEFORE Output Gain. Works without the
+    GUI and never touches the live audio stream's state."""
+    chain = OfflineChain(data, sr)
+    events = [_pluck_chord([82.41, 123.47, 164.81, 207.65, 246.94, 329.63], 1.6, sr),
+              _pluck_chord([110.0, 164.81, 220.0], 1.6, sr),
+              _pluck_chord([246.94], 1.6, sr)]
+    gap = np.zeros(int(0.5 * sr), dtype=np.float32)
+    power, peak = [], 0.0
+    for ev in events:
+        sig = np.concatenate([ev, gap])
+        y = np.concatenate([chain.process(sig[i:i + block])
+                            for i in range(0, len(sig), block)])
+        win = y[int(0.05 * sr):int(1.3 * sr)]       # sustained part of the note
+        power.append(float(np.mean(win.astype(np.float64) ** 2)))
+        # 99.9th percentile, not the absolute max: a pluck's first few
+        # milliseconds are a spike far above the rest and would otherwise
+        # dictate the gain of every clean profile.
+        peak = max(peak, float(np.percentile(np.abs(y), 99.9)))
+    rms_db  = 10.0 * math.log10(max(1e-14, float(np.mean(power))))
+    peak_db = 20.0 * math.log10(max(1e-7, peak))
+    return rms_db, peak_db
+
+def suggest_out_gain_db(rms_db, peak_db, target_db=LEVEL_MATCH_TARGET_DB):
+    """Output Gain (dB) that brings a measured chain to `target_db` RMS.
+    Returns (gain_db, note) — `note` is '' normally, or says why the result
+    fell short of the target (peak ceiling or slider range)."""
+    gain = target_db - rms_db
+    note = ''
+    if peak_db + gain > LEVEL_MATCH_PEAK_CEIL_DB:
+        gain = LEVEL_MATCH_PEAK_CEIL_DB - peak_db
+        note = 'limited by peaks'
+    lo, hi = OUT_GAIN_RANGE_DB
+    if gain < lo or gain > hi:
+        gain = min(max(gain, lo), hi)
+        note = 'limited by Output Gain range'
+    return gain, note
+
+# ─────────────────────────────────────────────────────────────
+# Recording and re-amping
+# ─────────────────────────────────────────────────────────────
+
+class FloatWavWriter:
+    """Streaming mono 32-bit float WAV writer. The stdlib wave module only
+    writes integer PCM, and float is what a take needs: a loud pass can't
+    clip inside the file, and every DAW reads it. The header's length
+    fields are re-patched about once per second of audio, so even a take
+    cut short by a crash or power loss is a valid, openable file."""
+    HEADER_BYTES = 56
+
+    def __init__(self, path, sr=SAMPLE_RATE):
+        self.path = str(path)
+        self.sr = int(sr)
+        self.frames = 0
+        self._last_patch = 0
+        self._f = open(self.path, 'wb')
+        self._f.write(b'RIFF' + (0).to_bytes(4, 'little') + b'WAVE')
+        self._f.write(b'fmt ' + (16).to_bytes(4, 'little')
+                      + (3).to_bytes(2, 'little')            # IEEE float
+                      + (1).to_bytes(2, 'little')            # mono
+                      + self.sr.to_bytes(4, 'little')
+                      + (self.sr * 4).to_bytes(4, 'little')
+                      + (4).to_bytes(2, 'little')
+                      + (32).to_bytes(2, 'little'))
+        self._f.write(b'fact' + (4).to_bytes(4, 'little') + (0).to_bytes(4, 'little'))
+        self._f.write(b'data' + (0).to_bytes(4, 'little'))
+        self._patch()
+
+    def _patch(self):
+        data_bytes = self.frames * 4
+        pos = self._f.tell()
+        self._f.seek(4);  self._f.write((self.HEADER_BYTES - 8 + data_bytes).to_bytes(4, 'little'))
+        self._f.seek(44); self._f.write(self.frames.to_bytes(4, 'little'))
+        self._f.seek(52); self._f.write(data_bytes.to_bytes(4, 'little'))
+        self._f.seek(pos)
+        self._f.flush()
+        self._last_patch = self.frames
+
+    def write(self, block):
+        a = np.asarray(block, dtype='<f4')
+        self._f.write(a.tobytes())
+        self.frames += len(a)
+        if self.frames - self._last_patch >= self.sr:
+            self._patch()
+
+    def close(self):
+        if self._f is not None:
+            try:
+                self._patch()
+            finally:
+                self._f.close()
+                self._f = None
+
+
+class Recorder:
+    """Records the amp's output (and, optionally, the raw dry input) to
+    mono 32-bit float WAV files. push() is called from the audio callback
+    and only copies the blocks into a bounded queue; a separate writer
+    thread does all the disk work, so recording can't glitch the audio. If
+    the disk ever falls behind far enough to fill the queue, blocks are
+    dropped and counted rather than blocking the audio thread."""
+    def __init__(self, wet_path, dry_path=None, include_looper=False,
+                 sr=SAMPLE_RATE, queue_blocks=4000):
+        self.wet_path = str(wet_path)
+        self.dry_path = str(dry_path) if dry_path else None
+        self.include_looper = include_looper
+        self.sr = sr
+        self.pushed = 0            # frames accepted from the audio thread
+        self.dropped = 0           # blocks lost because the writer fell behind
+        self.error = None          # message if the disk write failed
+        self.active = True
+        self._q = queue.Queue(maxsize=queue_blocks)
+        self._wet = FloatWavWriter(self.wet_path, sr)
+        self._dry = FloatWavWriter(self.dry_path, sr) if self.dry_path else None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    @property
+    def seconds(self):
+        return self.pushed / self.sr
+
+    def push(self, wet, dry):
+        """Audio thread. `wet`/`dry` are float32 blocks of equal length."""
+        if not self.active:
+            return
+        try:
+            self._q.put_nowait((wet.copy(), dry.copy() if self._dry is not None else None))
+            self.pushed += len(wet)
+        except queue.Full:
+            self.dropped += 1
+
+    def _run(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            if self.error:
+                continue                       # keep draining; the take is already lost
+            try:
+                self._wet.write(item[0])
+                if self._dry is not None and item[1] is not None:
+                    self._dry.write(item[1])
+            except Exception as e:             # disk full, folder removed, ...
+                self.error = str(e)
+
+    def stop(self):
+        """Finish the files and return the recorded length in seconds."""
+        self.active = False
+        self._q.put(None)
+        self._thread.join(timeout=15)
+        for w in (self._wet, self._dry):
+            if w is not None:
+                try: w.close()
+                except Exception as e: self.error = self.error or str(e)
+        return self._wet.frames / self.sr
+
+
+def _resample(x, sr_from, sr_to):
+    """Resample a mono float array. Polyphase when scipy is available;
+    otherwise plain linear interpolation (fine for a rough re-amp)."""
+    if int(sr_from) == int(sr_to) or len(x) == 0:
+        return np.asarray(x, dtype=np.float32)
+    if HAS_SCIPY:
+        g = math.gcd(int(sr_from), int(sr_to))
+        return spsig.resample_poly(x, int(sr_to) // g, int(sr_from) // g).astype(np.float32)
+    n = int(len(x) * sr_to / sr_from)
+    return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.float32)
+
+def read_audio_mono(path):
+    """Read any WAV (8/16/24/32-bit PCM or float, mono or multichannel,
+    any sample rate) as (mono float32 array, sample rate). Multichannel
+    files are averaged to mono."""
+    arr, nch, sr = _decode_wav(path)
+    if nch > 1:
+        arr = arr[:len(arr) // nch * nch].reshape(-1, nch).mean(axis=1)
+    return arr.astype(np.float32), int(sr)
+
+REAMP_TAIL_SECONDS = 2.0       # silence appended so reverb/delay tails finish
+REAMP_NORMALIZE_PEAK_DB = -12.0
+
+def reamp_render(data, audio, sr_in, normalize=False, progress=None, cancel=None,
+                 block=512):
+    """Run a recorded signal through the chain a profile dict describes.
+    Returns (processed mono float32, its sample rate) — back at `sr_in`
+    when scipy can resample, else at SAMPLE_RATE — or None if `cancel` (a
+    threading.Event) fired. Output Gain is applied, Master Volume is not.
+    `normalize` rescales the input peak to REAMP_NORMALIZE_PEAK_DB first,
+    since the amp's response depends on how hard it is driven and DI files
+    vary in level."""
+    x = _resample(audio, sr_in, SAMPLE_RATE)
+    if normalize:
+        pk = float(np.max(np.abs(x))) if len(x) else 0.0
+        if pk > 1e-9:
+            x = x * (10 ** (REAMP_NORMALIZE_PEAK_DB / 20.0) / pk)
+    x = np.concatenate([x, np.zeros(int(REAMP_TAIL_SECONDS * SAMPLE_RATE), dtype=np.float32)])
+    chain = OfflineChain(data)
+    out_gain = float(data.get('out_gain', 1.0))
+    outs = []
+    for i in range(0, len(x), block):
+        if cancel is not None and cancel.is_set():
+            return None
+        outs.append(chain.process(x[i:i + block]) * out_gain)
+        if progress is not None:
+            progress(min(1.0, (i + block) / len(x)))
+    y = np.concatenate(outs) if outs else np.zeros(0, dtype=np.float32)
+    sr_out = SAMPLE_RATE
+    if HAS_SCIPY and int(sr_in) != SAMPLE_RATE:
+        y = _resample(y, SAMPLE_RATE, sr_in)
+        sr_out = int(sr_in)
+    return y.astype(np.float32), sr_out
+
+def unique_path(path):
+    """`path`, or `name (2).ext`, `name (3).ext`... if it already exists —
+    a take or render never overwrites an earlier file."""
+    p = pathlib.Path(path)
+    if not p.exists():
+        return p
+    for i in range(2, 10000):
+        q = p.with_name(f'{p.stem} ({i}){p.suffix}')
+        if not q.exists():
+            return q
+    return p
+
+def safe_filename(name):
+    """A profile name made safe for use inside a file name."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name).strip(' .') or 'SoloTone'
+
+def open_with_default_app(path):
+    """Open a file in whatever the OS has associated with it (Audacity,
+    Audition, any DAW — whatever the user has set for .wav)."""
+    import subprocess
+    try:
+        if sys.platform == 'win32':
+            os.startfile(str(path))
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', str(path)])
+        else:
+            subprocess.Popen(['xdg-open', str(path)])
+        return True
+    except Exception:
+        return False
+
+def reveal_in_file_manager(path):
+    """Show a file selected in Explorer/Finder (or just open its folder)."""
+    import subprocess
+    try:
+        if sys.platform == 'win32':
+            subprocess.Popen(['explorer', f'/select,{os.path.normpath(str(path))}'])
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', '-R', str(path)])
+        else:
+            subprocess.Popen(['xdg-open', str(pathlib.Path(path).parent)])
+        return True
+    except Exception:
+        return False
 
 # ─────────────────────────────────────────────────────────────
 # Metronome engine
@@ -857,6 +1345,8 @@ class Tuner:
 
     def pitch(self):
         with self.lock: d = self.buf.copy()
+        base = self.amp.hum.base if self.amp is not None else 60.0
+        d = remove_mains_hum(d, base, SAMPLE_RATE)
         f = autocorrelate_pitch(d, SAMPLE_RATE, fmin=self.fmin, fmax=self.fmax)
         if f is None:
             self._hist.clear()
@@ -1232,7 +1722,9 @@ MIDI_MAPPABLE_TARGETS = [
     dict(id='in_gain',   label='Input Gain',  category='EQ / Amp', kind='cc',
          action=_midi_gain_action('in_gain', -12.0, 24.0, 'in_gain_sl', 'in_gain_val')),
     dict(id='out_gain',  label='Output Gain', category='EQ / Amp', kind='cc',
-         action=_midi_gain_action('out_gain', -24.0, 12.0, 'out_gain_sl', 'out_gain_val')),
+         action=_midi_gain_action('out_gain', *OUT_GAIN_RANGE_DB, 'out_gain_sl', 'out_gain_val')),
+    dict(id='master_gain', label='Master Volume', category='EQ / Amp', kind='cc',
+         action=_midi_gain_action('master_gain', *MASTER_RANGE_DB, 'master_sl', 'master_val')),
     dict(id='gate_thr',  label='Noise Gate Threshold', category='EQ / Amp', kind='cc',
          action=_midi_gate_action()),
     dict(id='hum_on', label='Hum Filter Enabled', category='EQ / Amp', kind='toggle',
@@ -1241,6 +1733,8 @@ MIDI_MAPPABLE_TARGETS = [
     # ── Transport / Looper / Tuner (pad triggers) ─────────────
     dict(id='panic_mute_all', label='Panic (Mute All)', category='Transport', kind='toggle',
          action=_midi_toggle_action('panic_var', lambda app, v: app._set_panic(v))),
+    dict(id='rec_toggle', label='Record Start/Stop', category='Transport', kind='toggle',
+         action=_midi_toggle_action('rec_var', lambda app, v: app._rec_set(v))),
     dict(id='tap_tempo',   label='Tap Tempo', category='Transport', kind='trigger',
          action=_midi_trigger_action(lambda app: app._tap())),
     dict(id='metro_toggle',label='Metronome Start/Stop', category='Transport', kind='trigger',
@@ -1631,11 +2125,12 @@ class AmpProcessor:
         self.out_dev    = None
         self.in_gain    = 1.0
         self.out_gain   = 1.0
+        self.master_gain = 1.0      # global master volume — never saved in profiles
+        self.recorder   = None      # Recorder | None — set by App while a take is running
+        self.peak_hold  = 0.0       # loudest output sample since the GUI last read it (pre-master)
         self.gate_thr   = 0.01      # noise gate threshold (linear)
         self.gate_open  = False
         self.gate_att   = 0.0
-        self.gate_alpha_on  = 1.0 - math.exp(-1.0/(SAMPLE_RATE * 0.003))
-        self.gate_alpha_off = 1.0 - math.exp(-1.0/(SAMPLE_RATE * 0.060))
         self.nam        = None      # StreamingNAM | None
         self.nam_on     = False
         self.ir_slots   = [IRConv() for _ in range(MAX_IR_SLOTS)]
@@ -1675,6 +2170,8 @@ class AmpProcessor:
         if status.input_underflow or status.output_underflow:
             self.xruns += 1
         raw = indata[:,0].astype(np.float32)
+        rec = self.recorder
+        dry_tap = raw.copy() if rec is not None else None   # the raw input, before any processing
         raw = self.hum.process(raw)   # mains-hum notch, ahead of everything else
         if self.tuner is not None and self.tuner.shared:
             self.tuner.feed(raw)
@@ -1684,11 +2181,8 @@ class AmpProcessor:
         with self.lock:
             x = x * self.in_gain
             rms = float(np.sqrt(np.mean(x**2)))
-            if rms >= self.gate_thr:
-                self.gate_att += self.gate_alpha_on  * (1.0 - self.gate_att)
-            else:
-                self.gate_att += self.gate_alpha_off * (0.0 - self.gate_att)
-            x = x * self.gate_att
+            self.gate_att, ramp = gate_step(self.gate_att, rms >= self.gate_thr, frames)
+            x = x * ramp
             if self.nam_on and self.nam is not None:
                 try:
                     x = self.nam.process(x)
@@ -1715,6 +2209,12 @@ class AmpProcessor:
                 x = self.ir_slots[self.ir_active].process(x)
             if self.eq_on:
                 x = self.eq.process(x)
+        # Post-amp pedals (the ones after the 'amp' marker in the chain order)
+        # run on the amp/cab/EQ output, ahead of the looper so a recorded
+        # loop still includes them. Like the pre-amp stage they hold no
+        # shared state, so they run outside amp.lock.
+        x = self.pedals.process_post(x, metro_bpm=bpm)
+        with self.lock:
             loop_out = np.zeros(frames, dtype=np.float32)
             if self.looper is not None:
                 loop_out = self.looper.process(x)
@@ -1724,13 +2224,24 @@ class AmpProcessor:
             # here. To avoid the nested-lock deadlock risk we instead store
             # the metro reference and pull outside the lock below.
             mix = (x + loop_out) * self.out_gain
+            # What a take records and the meter shows: the processed sound
+            # after Output Gain but BEFORE the metronome click and Master
+            # Volume, so neither the monitoring level nor the click track
+            # ends up in the file.
+            wet_tap = None
+            if rec is not None:
+                wet_tap = mix if rec.include_looper else x * self.out_gain
+            pk = float(np.max(np.abs(mix))) if mix.size else 0.0
+            if pk > self.peak_hold:
+                self.peak_hold = pk
+        if rec is not None:
+            rec.push(wet_tap, dry_tap)
         # Metro pull happens outside amp.lock to avoid nested-lock deadlock.
         if hasattr(self, 'metro') and self.metro is not None and                 self.metro.running and self.metro.shared:
             metro_chunk = self.metro.pull(frames)
             mix = mix + metro_chunk
-            np.clip(mix, -1.0, 1.0, out=mix)
-        else:
-            np.clip(mix, -1.0, 1.0, out=mix)
+        mix = mix * self.master_gain
+        np.clip(mix, -1.0, 1.0, out=mix)
         if self.panic:
             # Everything above (pedals, NAM, looper, metronome) already
             # ran and its state already advanced normally — only the
@@ -2440,6 +2951,27 @@ class App(tk.Tk):
         # IR per-slot labels (user-editable)
         self.ir_label_vars = [tk.StringVar(value=f'IR {i+1}') for i in range(MAX_IR_SLOTS)]
 
+        # Recording / re-amp state (see _tab_record). rec_var mirrors "a take
+        # is running" so a mapped pad's LED can follow it like any toggle.
+        self.rec_var        = tk.BooleanVar(value=False)
+        self.rec_var.trace_add('write', lambda *_a: self._lpd8_refresh_leds())
+        self.rec_dry_var    = tk.BooleanVar(value=True)
+        self.rec_loop_var   = tk.BooleanVar(value=False)
+        self.reamp_norm_var = tk.BooleanVar(value=False)
+        self.reamp_src_var  = tk.StringVar(value='')
+        self._rec           = None      # the Recorder of the take in progress
+        self._rec_dir       = None      # chosen on the first take; saved in the session
+        self._rec_takes     = []        # this run's finished takes, oldest first
+        self._rec_meter_db  = -90.0
+        self._tn_idx = None        # tuner: string currently shown, its challenger and how often it won
+        self._tn_cand = None
+        self._tn_cand_n = 0
+        self._tn_silent = 0
+        self._rec_amp_was_running = False
+        self._reamp_dir     = None
+        self._reamp_job     = None
+        self._reamp_result  = None
+
         self._style()
         self._build()
         self._load_session()
@@ -2455,6 +2987,7 @@ class App(tk.Tk):
         self._poll_tuner()
         self._poll_amp()
         self._poll_looper()
+        self._rec_tick()
         self._poll_midi()
         # Restore file paths after UI is fully ready
         self.after(200, self._restore_file_paths)
@@ -2626,6 +3159,7 @@ class App(tk.Tk):
         t_io    = ttk.Frame(nb)
         t_chain = ttk.Frame(nb)
         t_loop  = ttk.Frame(nb)
+        t_rec   = ttk.Frame(nb)
         t_metro = ttk.Frame(nb)
 
         t_pedals   = ttk.Frame(nb)
@@ -2634,6 +3168,7 @@ class App(tk.Tk):
         nb.add(t_chain,    text='  Signal Chain  ')
         nb.add(t_pedals,   text='  Pedals  ')
         nb.add(t_loop,     text='  Looper  ')
+        nb.add(t_rec,      text='  Record  ')
         nb.add(t_metro,    text='  Metronome  ')
         nb.add(t_settings, text='  Settings  ')
 
@@ -2642,6 +3177,7 @@ class App(tk.Tk):
         self._tab_chain(t_chain)
         self._tab_pedals(t_pedals)
         self._tab_looper(t_loop)
+        self._tab_record(t_rec)
         self._tab_metro(t_metro)
         self._tab_settings(t_settings)
 
@@ -2710,6 +3246,36 @@ class App(tk.Tk):
         #                 bottom row = tuning preset selector + 6-string readout
         foot = tk.Frame(self, bg=BG_WELL)
         foot.pack(side='bottom', fill='x')
+
+        # ── record strip: one click to record, meter always live ─
+        rs = tk.Frame(foot, bg='#0a0d10')
+        rs.pack(fill='x', ipady=3)
+        self.rec_btn = tk.Button(rs, text='●  REC', font=(FF,10,'bold'), width=9,
+                                  bg='#2c333b', fg=RED, activebackground=RED,
+                                  activeforeground='white', relief='flat', bd=0,
+                                  command=self._rec_toggle)
+        self.rec_btn.pack(side='left', padx=(10,8), pady=2)
+        self.rec_time_lbl = tk.Label(rs, text='00:00.0', bg='#0a0d10', fg=DIM,
+                                      font=(FF,12,'bold'), width=7)
+        self.rec_time_lbl.pack(side='left')
+        self.rec_meter = tk.Canvas(rs, width=190, height=12, bg=BG_WELL,
+                                    highlightthickness=1, highlightbackground='#2c333b')
+        self.rec_meter.pack(side='left', padx=8)
+        tk.Checkbutton(rs, text='Dry track', variable=self.rec_dry_var, bg='#0a0d10', fg=DIM,
+                       selectcolor='#2a3540', activebackground='#0a0d10',
+                       activeforeground=FG, font=(FF,9)).pack(side='left')
+        # Raw tk.Buttons (like REC beside them) so the strip stays slim —
+        # the ttk buttons' padding would make this row twice as tall.
+        btn_kw = dict(font=(FF,9), bg='#2c333b', fg=FG, activebackground='#3a4048',
+                      activeforeground=FG, disabledforeground=DIM, relief='flat', bd=0,
+                      padx=10, pady=2, state='disabled')
+        self.rec_folder_btn = tk.Button(rs, text='Folder', command=self._rec_reveal_last, **btn_kw)
+        self.rec_folder_btn.pack(side='right', padx=(0,10), pady=2)
+        self.rec_open_btn = tk.Button(rs, text='Open', command=self._rec_open_last, **btn_kw)
+        self.rec_open_btn.pack(side='right', padx=4, pady=2)
+        self.rec_status_lbl = tk.Label(rs, text='', anchor='w', bg='#0a0d10', fg=DIM, font=(FF,9))
+        self.rec_status_lbl.pack(side='left', fill='x', expand=True, padx=8)
+        self._rec_update_status()
 
         # ── top row ──────────────────────────────────────────────
         top = tk.Frame(foot, bg=BG_WELL, height=68)
@@ -3080,7 +3646,18 @@ class App(tk.Tk):
         self.in_gain_sl,  self.in_gain_val  = self._knob_row(
             lvl_sec, 'Input Gain (dB)',  -12, 24,  0, self._set_in_gain)
         self.out_gain_sl, self.out_gain_val = self._knob_row(
-            lvl_sec, 'Output Gain (dB)', -24, 12, -6, self._set_out_gain)
+            lvl_sec, 'Output Gain (dB)', *OUT_GAIN_RANGE_DB, -6, self._set_out_gain)
+        match_row = tk.Frame(lvl_sec, bg=PANEL); match_row.pack(fill='x', padx=10, pady=(0,4))
+        self.match_btn = ttk.Button(match_row, text='Match level', command=self._match_level)
+        self.match_btn.pack(side='left')
+        self.match_lbl = tk.Label(match_row,
+            text=f'Sets Output Gain so this sound lands at {LEVEL_MATCH_TARGET_DB:.0f} dBFS RMS, like every other matched profile',
+            bg=PANEL, fg=DIM, font=(FF,10), anchor='w')
+        self.match_lbl.pack(side='left', padx=10)
+        self.master_sl, self.master_val = self._knob_row(
+            lvl_sec, 'Master Volume (dB)', *MASTER_RANGE_DB, 0, self._set_master)
+        tk.Label(lvl_sec, text='Master Volume is global — profiles never change it. Output Gain is saved per profile.',
+                 bg=PANEL, fg=DIM, font=(FF,10), anchor='w').pack(fill='x', padx=10, pady=(0,6))
 
         # ── noise gate ───────────────────────────────────────
         gate_sec = self._sec(inner, 'Noise Gate',
@@ -3204,6 +3781,36 @@ class App(tk.Tk):
 
     def _set_in_gain(self, v):  self.amp.in_gain  = 10**(float(v)/20.0)
     def _set_out_gain(self, v): self.amp.out_gain = 10**(float(v)/20.0)
+    def _set_master(self, v):   self.amp.master_gain = 10**(float(v)/20.0)
+
+    def _match_level(self):
+        """Measure the current sound offline (on a worker thread, so the UI
+        and live audio keep running) and set Output Gain to hit the target."""
+        data = self._gather_profile_dict('')
+        self.match_btn.configure(state='disabled')
+        self.match_lbl.configure(text='Measuring…', fg=ACCENT)
+        box = []
+        def work():
+            try:
+                box.append(measure_profile_level(data))
+            except Exception as e:
+                box.append(e)
+        threading.Thread(target=work, daemon=True).start()
+        def poll():
+            if not box:
+                self.after(100, poll); return
+            self.match_btn.configure(state='normal')
+            res = box[0]
+            if isinstance(res, Exception):
+                self.match_lbl.configure(text=f'Could not measure: {res}', fg=DIM); return
+            rms_db, peak_db = res
+            gain_db, note = suggest_out_gain_db(rms_db, peak_db)
+            self.amp.out_gain = 10 ** (gain_db / 20.0)
+            self._set_knob(self.out_gain_sl, self.out_gain_val, gain_db, f'{gain_db:+.1f} dB')
+            self.match_lbl.configure(
+                text=f'Measured {rms_db:.1f} dBFS RMS before Output Gain → set to {gain_db:+.1f} dB'
+                     + (f'  ({note})' if note else ''), fg=FG)
+        poll()
     def _set_gate(self, v):     self.amp.gate_thr = 10**(-float(v)/20.0)
 
     def _set_panic(self, v):
@@ -3222,6 +3829,8 @@ class App(tk.Tk):
 
     def _toggle_amp(self):
         if self.amp.running:
+            if self._rec is not None:
+                self._rec_stop()          # finish the take before its audio source goes away
             self.amp.stop()
             self.amp_btn.configure(text='▶  START AMP')
         else:
@@ -3313,6 +3922,23 @@ class App(tk.Tk):
         self.profile_lbl = tk.Label(prof_row, text='No profile loaded', bg=PANEL, fg=DIM,
                                      font=(FF,10))
         self.profile_lbl.pack(side='left', padx=10)
+
+        # Free-text notes saved with the profile — which pickup/position,
+        # what the guitar's knobs should be set to, anything that can't be
+        # captured in the settings themselves. Editable: whatever is in the
+        # box when you Save Profile is what gets written.
+        tk.Label(prof_sec, text='Notes  (saved with the profile — pickup, guitar knobs, tips)',
+                 bg=PANEL, fg=DIM, font=(FF,9), anchor='w').pack(fill='x', padx=10)
+        notes_row = tk.Frame(prof_sec, bg=PANEL); notes_row.pack(fill='x', padx=10, pady=(2,8))
+        self.profile_notes = tk.Text(notes_row, height=5, wrap='word', bg=BG_WELL, fg=FG,
+                                      insertbackground=FG, relief='flat', font=(FF,10),
+                                      padx=8, pady=6, highlightthickness=1,
+                                      highlightbackground='#2c333b', highlightcolor=ACCENT,
+                                      undo=True)
+        notes_sb = ttk.Scrollbar(notes_row, orient='vertical', command=self.profile_notes.yview)
+        self.profile_notes.configure(yscrollcommand=notes_sb.set)
+        self.profile_notes.pack(side='left', fill='x', expand=True)
+        notes_sb.pack(side='left', fill='y')
 
         # ── NAM ──────────────────────────────────────────────
         nam_sec = self._sec(inner, 'NAM Amp Model  (.nam — WaveNet)')
@@ -3470,6 +4096,7 @@ class App(tk.Tk):
         return {
             'solotone_profile': PROFILE_FORMAT_VERSION,
             'name':          name,
+            'notes':         self.profile_notes.get('1.0', 'end-1c').strip(),
             'nam_path':      self._current_nam_path,
             'ir_paths':      list(self._current_ir_paths),
             'ir_active':     amp.ir_active,
@@ -3577,8 +4204,8 @@ class App(tk.Tk):
 
         pedal_data = data.get('pedals', {})
         if 'order' in pedal_data:
-            order = pedal_data['order']
-            if isinstance(order, list) and sorted(order) == sorted(amp.pedals.order):
+            order = normalize_order(pedal_data['order'])
+            if order is not None:
                 amp.pedals.order = order
         for field in PEDAL_PROFILE_FIELDS:
             if field == 'order' or field not in pedal_data:
@@ -3612,6 +4239,11 @@ class App(tk.Tk):
 
         if 'tuning' in data:
             self._restore_tuning(data['tuning'])
+
+        notes = data.get('notes')
+        self.profile_notes.delete('1.0', 'end')
+        if isinstance(notes, str):
+            self.profile_notes.insert('1.0', notes)
 
         name = data.get('name') or pathlib.Path(path).stem
         self._current_profile_path = path
@@ -3884,6 +4516,452 @@ class App(tk.Tk):
         self.eq_level_val.set('+0 dB')
 
     # ── TAB 3: Looper ────────────────────────────────────────
+
+    # ── TAB: Record (takes + re-amp) ─────────────────────────
+
+    METER_FLOOR_DB = -60.0
+
+    def _tab_record(self, root):
+        inner = self._scrollable(root)
+
+        rec_sec = self._sec(inner, 'Recording')
+        r1 = tk.Frame(rec_sec, bg=PANEL); r1.pack(fill='x', padx=10, pady=(8,4))
+        tk.Label(r1, text='Save to:', bg=PANEL, fg=FG, font=(FF,11)).pack(side='left')
+        self.rec_dir_lbl = tk.Label(r1, text='', bg=PANEL, fg=DIM, font=(FF,10), anchor='w')
+        self.rec_dir_lbl.pack(side='left', padx=8, fill='x', expand=True)
+        ttk.Button(r1, text='Open folder', command=self._rec_open_folder).pack(side='right')
+        ttk.Button(r1, text='Change…', command=self._rec_choose_folder).pack(side='right', padx=6)
+
+        r2 = tk.Frame(rec_sec, bg=PANEL); r2.pack(fill='x', padx=10, pady=2)
+        ttk.Checkbutton(r2, text='Also record the dry guitar  (the raw input, for re-amping later)',
+                        variable=self.rec_dry_var).pack(anchor='w')
+        ttk.Checkbutton(r2, text='Include looper playback in the take',
+                        variable=self.rec_loop_var).pack(anchor='w', pady=(2,0))
+        tk.Label(rec_sec,
+                 text='Each take is two mono 32-bit float WAV files, sample-aligned, that open straight in '
+                      'Audacity, Audition or any DAW. The metronome click and Master Volume are never recorded.',
+                 bg=PANEL, fg=DIM, font=(FF,9), anchor='w', justify='left', wraplength=700
+                 ).pack(fill='x', padx=10, pady=(6,4))
+
+        tk.Label(rec_sec, text='Takes this session', bg=PANEL, fg=FG, font=(FF,10, 'bold'),
+                 anchor='w').pack(fill='x', padx=10, pady=(6,2))
+        lb_row = tk.Frame(rec_sec, bg=PANEL); lb_row.pack(fill='x', padx=10, pady=(0,4))
+        self.rec_list = tk.Listbox(lb_row, height=5, bg=BG_WELL, fg=FG, font=(FF,10),
+                                    selectbackground=ACCENT_DIM, selectforeground=FG,
+                                    relief='flat', highlightthickness=1,
+                                    highlightbackground='#2c333b', highlightcolor=ACCENT,
+                                    activestyle='none', exportselection=False)
+        lb_sb = ttk.Scrollbar(lb_row, orient='vertical', command=self.rec_list.yview)
+        self.rec_list.configure(yscrollcommand=lb_sb.set)
+        self.rec_list.pack(side='left', fill='x', expand=True)
+        lb_sb.pack(side='left', fill='y')
+        tb = tk.Frame(rec_sec, bg=PANEL); tb.pack(fill='x', padx=10, pady=(0,10))
+        ttk.Button(tb, text='Open wet', command=lambda: self._rec_open_take('wet')).pack(side='left')
+        ttk.Button(tb, text='Open dry', command=lambda: self._rec_open_take('dry')).pack(side='left', padx=6)
+        ttk.Button(tb, text='Show in folder', command=self._rec_reveal_take).pack(side='left')
+        ttk.Button(tb, text='Re-amp this take’s dry  ↓', command=self._reamp_use_take).pack(side='right')
+
+        ra_sec = self._sec(inner, 'Re-amp a recording')
+        self.reamp_sound_lbl = tk.Label(ra_sec, text='', bg=PANEL, fg=ACCENT, font=(FF,10), anchor='w')
+        self.reamp_sound_lbl.pack(fill='x', padx=10, pady=(8,0))
+        tk.Label(ra_sec,
+                 text='Runs any WAV (a dry DI, a vocal-free stem, a take from another session) through the '
+                      'amp, cab, EQ and pedals exactly as they are set right now, and saves the result next to the file.',
+                 bg=PANEL, fg=DIM, font=(FF,9), anchor='w', justify='left', wraplength=700
+                 ).pack(fill='x', padx=10, pady=(2,6))
+        sr_row = tk.Frame(ra_sec, bg=PANEL); sr_row.pack(fill='x', padx=10, pady=2)
+        tk.Label(sr_row, text='WAV file:', bg=PANEL, fg=FG, font=(FF,11)).pack(side='left')
+        ttk.Button(sr_row, text='Browse…', command=self._reamp_browse).pack(side='right')
+        tk.Entry(sr_row, textvariable=self.reamp_src_var, bg=BG_WELL, fg=FG, insertbackground=FG,
+                 relief='flat', font=(FF,10), highlightthickness=1,
+                 highlightbackground='#2c333b', highlightcolor=ACCENT
+                 ).pack(side='left', fill='x', expand=True, padx=8, ipady=4)
+        ttk.Checkbutton(ra_sec, text=f'Normalize the input peak to {REAMP_NORMALIZE_PEAK_DB:.0f} dBFS first  '
+                                      '(for DI files recorded at different levels)',
+                        variable=self.reamp_norm_var).pack(anchor='w', padx=10, pady=(4,6))
+        go_row = tk.Frame(ra_sec, bg=PANEL); go_row.pack(fill='x', padx=10, pady=(2,4))
+        self.reamp_go_btn = ttk.Button(go_row, text='▶  RE-AMP', style='Go.TButton',
+                                        command=self._reamp_run)
+        self.reamp_go_btn.pack(side='left')
+        self.reamp_cancel_btn = ttk.Button(go_row, text='Cancel', command=self._reamp_cancel,
+                                            state='disabled')
+        self.reamp_cancel_btn.pack(side='left', padx=8)
+        self.reamp_prog = tk.Canvas(go_row, height=18, bg=BG_WELL, highlightthickness=1,
+                                     highlightbackground='#2c333b')
+        self.reamp_prog.pack(side='left', fill='x', expand=True, padx=8)
+        self.reamp_status_lbl = tk.Label(ra_sec, text='', bg=PANEL, fg=DIM, font=(FF,10), anchor='w',
+                                          justify='left', wraplength=700)
+        self.reamp_status_lbl.pack(fill='x', padx=10, pady=(2,4))
+        res_row = tk.Frame(ra_sec, bg=PANEL); res_row.pack(fill='x', padx=10, pady=(0,10))
+        self.reamp_open_btn = ttk.Button(res_row, text='Open result', command=self._reamp_open_result,
+                                          state='disabled')
+        self.reamp_open_btn.pack(side='left')
+        self.reamp_reveal_btn = ttk.Button(res_row, text='Show in folder', command=self._reamp_reveal_result,
+                                            state='disabled')
+        self.reamp_reveal_btn.pack(side='left', padx=6)
+
+        self._rec_refresh_dir_label()
+        self._rec_refresh_takes()
+        self._reamp_refresh_result_buttons()
+
+    # ── recording: folder, start/stop, polling ───────────────
+
+    def _rec_default_dir(self):
+        return pathlib.Path.home() / 'Documents' / 'SoloTone Recordings'
+
+    def _rec_refresh_dir_label(self):
+        if hasattr(self, 'rec_dir_lbl'):
+            self.rec_dir_lbl.configure(
+                text=str(self._rec_dir) if self._rec_dir else 'not chosen yet — you will be asked on the first take')
+
+    def _rec_choose_folder(self):
+        """Ask where recordings go. Starts in Documents/SoloTone Recordings
+        (created if missing) so accepting the default is one click."""
+        start = pathlib.Path(self._rec_dir) if self._rec_dir else self._rec_default_dir()
+        try:
+            start.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            start = pathlib.Path.home()
+        chosen = filedialog.askdirectory(title='Choose where SoloTone saves recordings',
+                                         initialdir=str(start), mustexist=False)
+        if not chosen:
+            return None
+        self._rec_dir = str(pathlib.Path(chosen))
+        self._rec_refresh_dir_label()
+        self._save_session()
+        return pathlib.Path(self._rec_dir)
+
+    def _rec_open_folder(self):
+        folder = pathlib.Path(self._rec_dir) if self._rec_dir else self._rec_default_dir()
+        if not folder.exists():
+            try: folder.mkdir(parents=True, exist_ok=True)
+            except OSError: return
+        open_with_default_app(folder)
+
+    def _rec_profile_name(self):
+        p = self._current_profile_path
+        return pathlib.Path(p).stem if p else 'SoloTone'
+
+    def _rec_toggle(self):
+        self._rec_set(self._rec is None)
+
+    def _rec_set(self, on):
+        """The one entry point for button, footswitch/pad and keybind: start
+        or stop a take, keeping rec_var (the pad LED's source) in step."""
+        if on:
+            if not self._rec_start():
+                self.rec_var.set(False)
+        else:
+            self._rec_stop()
+
+    def _rec_start(self):
+        if self._rec is not None:
+            return True
+        if not self.amp.running:
+            messagebox.showinfo('Start the amp first',
+                                'Press START AMP on the I/O & Levels tab, then record.')
+            return False
+        if not self._rec_dir:
+            if self._rec_choose_folder() is None:
+                return False                  # cancelled the folder choice: no take
+        folder = pathlib.Path(self._rec_dir)
+        stamp = time.strftime('%Y-%m-%d %H-%M-%S')
+        base = f'{safe_filename(self._rec_profile_name())} - {stamp}'
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            wet = unique_path(folder / f'{base} (wet).wav')
+            dry = unique_path(folder / f'{base} (dry).wav') if self.rec_dry_var.get() else None
+            rec = Recorder(wet, dry, include_looper=self.rec_loop_var.get())
+        except OSError as e:
+            messagebox.showerror('Cannot record', f'Could not create the recording files in\n{folder}\n\n{e}')
+            return False
+        self._rec = rec
+        self.amp.recorder = rec
+        self.rec_var.set(True)
+        self._rec_update_status()
+        return True
+
+    def _rec_stop(self):
+        rec = self._rec
+        if rec is None:
+            self.rec_var.set(False)
+            return
+        self.amp.recorder = None
+        self._rec = None
+        secs = rec.stop()
+        self._rec_takes.append(dict(wet=rec.wet_path, dry=rec.dry_path, seconds=secs,
+                                     when=time.strftime('%H:%M:%S'), dropped=rec.dropped,
+                                     error=rec.error))
+        self.rec_var.set(False)
+        self._rec_refresh_takes()
+        if rec.error:
+            messagebox.showerror('Recording problem',
+                                 f'The take stopped early because of a disk error:\n\n{rec.error}')
+        elif rec.dropped:
+            messagebox.showwarning('Recording problem',
+                                   f'{rec.dropped} audio blocks were dropped because the disk could not '
+                                   'keep up. The take has gaps.')
+        self._rec_update_status()
+
+    def _rec_last_take(self):
+        return self._rec_takes[-1] if self._rec_takes else None
+
+    def _rec_update_status(self):
+        """Footer status text, the Open/Folder buttons, and the REC button
+        look. Cheap; called when state changes and from the poll loop."""
+        try:
+            if self._rec is not None:
+                self.rec_btn.configure(text='■  STOP', bg=RED, fg='white')
+                self.rec_status_lbl.configure(
+                    text='Recording wet' + (' + dry' if self._rec.dry_path else ''), fg=FG)
+            else:
+                self.rec_btn.configure(text='●  REC', bg='#2c333b', fg=RED)
+                last = self._rec_last_take()
+                if not self.amp.running:
+                    msg, col = 'Start the amp to record', DIM
+                elif last:
+                    msg, col = (f'Saved {last["seconds"]:.1f}s at {last["when"]}', FG)
+                else:
+                    msg, col = 'Ready — wet' + (' + dry' if self.rec_dry_var.get() else '') + ' mono WAVs', DIM
+                self.rec_status_lbl.configure(text=msg, fg=col)
+                self.rec_time_lbl.configure(fg=DIM)
+            state = 'normal' if self._rec_last_take() else 'disabled'
+            self.rec_open_btn.configure(state=state)
+            self.rec_folder_btn.configure(state=state)
+        except tk.TclError:
+            pass
+
+    def _rec_open_last(self):
+        t = self._rec_last_take()
+        if t: open_with_default_app(t['wet'])
+
+    def _rec_reveal_last(self):
+        t = self._rec_last_take()
+        if t: reveal_in_file_manager(t['wet'])
+
+    def _rec_take_text(self, t):
+        m, s = divmod(int(round(t['seconds'])), 60)
+        kind = 'wet + dry' if t['dry'] else 'wet'
+        flag = '   ⚠ incomplete' if (t.get('error') or t.get('dropped')) else ''
+        name = re.sub(r' \((?:wet|dry)\)(?: \(\d+\))?\.wav$', '', pathlib.Path(t['wet']).name)
+        return f"{t['when']}   {name}   {m}:{s:02d}   {kind}{flag}"
+
+    def _rec_refresh_takes(self):
+        if not hasattr(self, 'rec_list'):
+            return
+        try:
+            self.rec_list.delete(0, 'end')
+            for t in reversed(self._rec_takes):
+                self.rec_list.insert('end', self._rec_take_text(t))
+            if self._rec_takes:
+                self.rec_list.selection_set(0)
+        except tk.TclError:
+            pass
+
+    def _rec_selected_take(self):
+        sel = self.rec_list.curselection() if hasattr(self, 'rec_list') else ()
+        if not sel:
+            return self._rec_last_take()
+        return list(reversed(self._rec_takes))[sel[0]]
+
+    def _rec_open_take(self, which):
+        t = self._rec_selected_take()
+        if not t:
+            messagebox.showinfo('No takes yet', 'Record something first.'); return
+        path = t.get(which)
+        if not path:
+            messagebox.showinfo('No dry file', 'That take was recorded without the dry track.'); return
+        if not open_with_default_app(path):
+            messagebox.showerror('Cannot open', f'Could not open\n{path}')
+
+    def _rec_reveal_take(self):
+        t = self._rec_selected_take()
+        if t: reveal_in_file_manager(t['wet'])
+
+    def _rec_draw_meter(self, db, clip):
+        c = self.rec_meter
+        c.delete('all')
+        w = int(c.winfo_width() or 190)
+        h = int(c.winfo_height() or 12)
+        lo = self.METER_FLOOR_DB
+        def xpos(d): return max(0, min(w, int((d - lo) / -lo * w)))
+        x = xpos(db)
+        col = RED if (clip or db > -3) else ('#f5a623' if db > -12 else ACCENT)
+        if x > 0:
+            c.create_rectangle(0, 0, x, h, fill=col, outline='')
+        for tick in (-24, -12, -6, -3):
+            tx = xpos(tick)
+            c.create_line(tx, 0, tx, h, fill='#2c333b')
+        if clip:
+            c.create_text(w - 4, h // 2, text='CLIP', anchor='e', fill='white', font=(FF, 7, 'bold'))
+
+    def _rec_tick(self):
+        """Every 50 ms: meter, timer, button pulse, and the safety checks
+        (amp stopped mid-take, disk error). Widgets are looked up by
+        attribute each time so this keeps working across a theme rebuild."""
+        try:
+            peak = self.amp.peak_hold
+            self.amp.peak_hold = 0.0
+            db = 20.0 * math.log10(peak) if peak > 1e-6 else -90.0
+            now = time.monotonic()
+            self._rec_meter_db = max(db, self._rec_meter_db - 1.5)
+            if peak > 1.0:
+                self._rec_clip_until = now + 1.5
+            self._rec_draw_meter(self._rec_meter_db, now < getattr(self, '_rec_clip_until', 0.0))
+            rec = self._rec
+            if rec is not None:
+                if not self.amp.running or rec.error:
+                    self._rec_stop()
+                else:
+                    secs = rec.seconds
+                    m, s = divmod(secs, 60)
+                    self.rec_time_lbl.configure(text=f'{int(m):02d}:{s:04.1f}', fg=RED)
+                    pulse = int(now * 2) % 2 == 0
+                    self.rec_btn.configure(bg=RED if pulse else '#c24a4a')
+            elif self._rec_amp_was_running != self.amp.running:
+                self._rec_amp_was_running = self.amp.running
+                self._rec_update_status()
+            self._tick_n = getattr(self, '_tick_n', 0) + 1
+            if self._tick_n % 20 == 0 and hasattr(self, 'reamp_sound_lbl'):
+                self.reamp_sound_lbl.configure(text=f'Sound: {self._rec_profile_name()}'
+                                               if self._current_profile_path else 'Sound: current settings')
+        except tk.TclError:
+            pass
+        self.after(50, self._rec_tick)
+
+    # ── re-amp ───────────────────────────────────────────────
+
+    def _reamp_browse(self):
+        start = self._reamp_dir or self._rec_dir or str(self._rec_default_dir())
+        if not pathlib.Path(start).is_dir():
+            start = str(pathlib.Path.home())
+        path = filedialog.askopenfilename(title='Choose a WAV file to re-amp', initialdir=start,
+                                          filetypes=[('WAV audio', '*.wav'), ('All files', '*.*')])
+        if path:
+            self.reamp_src_var.set(path)
+            self._reamp_dir = str(pathlib.Path(path).parent)
+
+    def _reamp_use_take(self):
+        t = self._rec_selected_take()
+        if not t:
+            messagebox.showinfo('No takes yet', 'Record something first.'); return
+        if not t.get('dry'):
+            messagebox.showinfo('No dry file', 'That take was recorded without the dry track.'); return
+        self.reamp_src_var.set(t['dry'])
+
+    def _reamp_set_status(self, text, color=DIM):
+        try: self.reamp_status_lbl.configure(text=text, fg=color)
+        except tk.TclError: pass
+
+    def _reamp_draw_progress(self, frac):
+        try:
+            c = self.reamp_prog
+            c.delete('all')
+            w = int(c.winfo_width() or 200); h = int(c.winfo_height() or 18)
+            if frac > 0:
+                c.create_rectangle(0, 0, int(w * frac), h, fill=ACCENT, outline='')
+        except tk.TclError:
+            pass
+
+    def _reamp_refresh_result_buttons(self):
+        have = bool(self._reamp_result)
+        for b in (getattr(self, 'reamp_open_btn', None), getattr(self, 'reamp_reveal_btn', None)):
+            if b is not None:
+                try: b.configure(state='normal' if have else 'disabled')
+                except tk.TclError: pass
+
+    def _reamp_open_result(self):
+        if self._reamp_result: open_with_default_app(self._reamp_result)
+
+    def _reamp_reveal_result(self):
+        if self._reamp_result: reveal_in_file_manager(self._reamp_result)
+
+    def _reamp_cancel(self):
+        job = self._reamp_job
+        if job: job['cancel'].set()
+
+    def _reamp_run(self):
+        if self._reamp_job is not None:
+            return
+        src = self.reamp_src_var.get().strip().strip('"')
+        if not src or not pathlib.Path(src).is_file():
+            messagebox.showinfo('Choose a file', 'Pick a WAV file to re-amp first.')
+            return
+        data = self._gather_profile_dict('')
+        sound = self._rec_profile_name()
+        job = dict(cancel=threading.Event(), progress=0.0, done=False, error=None, out=None)
+        self._reamp_job = job
+        self._reamp_result = None
+        self._reamp_refresh_result_buttons()
+        self.reamp_go_btn.configure(state='disabled')
+        self.reamp_cancel_btn.configure(state='normal')
+        self._reamp_set_status('Reading the file…', ACCENT)
+        normalize = self.reamp_norm_var.get()
+        fallback_dir = pathlib.Path(self._rec_dir) if self._rec_dir else self._rec_default_dir()
+
+        def work():
+            try:
+                audio, sr = read_audio_mono(src)
+                if len(audio) == 0:
+                    raise ValueError('The file contains no audio.')
+                def prog(f): job['progress'] = f
+                res = reamp_render(data, audio, sr, normalize=normalize, progress=prog,
+                                   cancel=job['cancel'])
+                if res is None:
+                    return
+                y, sr_out = res
+                name = f'{pathlib.Path(src).stem} - {safe_filename(sound)}.wav'
+                out = unique_path(pathlib.Path(src).with_name(name))
+                try:
+                    w = FloatWavWriter(out, sr_out)
+                except OSError:               # source folder not writable
+                    fallback_dir.mkdir(parents=True, exist_ok=True)
+                    out = unique_path(fallback_dir / name)
+                    w = FloatWavWriter(out, sr_out)
+                try:
+                    for i in range(0, len(y), 65536):
+                        w.write(y[i:i + 65536])
+                finally:
+                    w.close()
+                job['out'] = str(out)
+                job['peak'] = float(np.max(np.abs(y))) if len(y) else 0.0
+            except Exception as e:
+                job['error'] = str(e) or type(e).__name__
+            finally:
+                job['done'] = True
+        threading.Thread(target=work, daemon=True).start()
+        self._reamp_poll()
+
+    def _reamp_poll(self):
+        job = self._reamp_job
+        if job is None:
+            return
+        if not job['done']:
+            f = job['progress']
+            self._reamp_draw_progress(f)
+            if f > 0:
+                self._reamp_set_status(f'Rendering…  {int(f * 100)}%', ACCENT)
+            self.after(100, self._reamp_poll)
+            return
+        self._reamp_job = None
+        try:
+            self.reamp_go_btn.configure(state='normal')
+            self.reamp_cancel_btn.configure(state='disabled')
+        except tk.TclError:
+            pass
+        if job['error']:
+            self._reamp_draw_progress(0)
+            self._reamp_set_status(f'Could not re-amp: {job["error"]}', RED)
+        elif job['out'] is None:
+            self._reamp_draw_progress(0)
+            self._reamp_set_status('Cancelled.', DIM)
+        else:
+            self._reamp_draw_progress(1.0)
+            self._reamp_result = job['out']
+            pk_db = 20.0 * math.log10(max(1e-7, job.get('peak', 0.0)))
+            warn = '  ·  peaks go over 0 dBFS (fine in a 32-bit float file; lower Output Gain if it clips in your DAW)' if pk_db > 0 else ''
+            self._reamp_set_status(f'Saved {pathlib.Path(job["out"]).name}  ·  peak {pk_db:+.1f} dBFS{warn}', FG)
+            self._reamp_refresh_result_buttons()
 
     def _tab_looper(self, root):
         # settings bar
@@ -4684,7 +5762,7 @@ class App(tk.Tk):
             spec = PEDAL_ICON_SPECS.get(code)
             if spec:
                 return _hex_to_rgb(spec[1])
-        if tid == 'panic_mute_all':
+        if tid in ('panic_mute_all', 'rec_toggle'):
             return _hex_to_rgb(RED)
         return _hex_to_rgb(ACCENT)
 
@@ -5058,62 +6136,120 @@ class App(tk.Tk):
                 box.configure(bg='#1a2128', highlightbackground='#2c333b')
                 box.pack(side='left', padx=2)
         self.str_cents_lbl.configure(text='')
+        self._tn_idx = None; self._tn_cand = None; self._tn_cand_n = 0
+        self._apply_tuner_range()
 
-    def _update_string_readout(self, freq):
-        """Highlight the closest string in the readout and show cents-to-target."""
-        tuning_name = self.tuning_var.get()
-        tuning_midi = GUITAR_TUNING_MIDI.get(tuning_name)
-        # Reset all boxes
+    def _clear_string_readout(self):
         for box, lbl in zip(self.str_boxes, self.str_labels):
             box.configure(bg='#1a2128', highlightbackground='#2c333b')
             lbl.configure(bg='#1a2128', fg=DIM)
+        self.str_cents_lbl.configure(text='')
 
-        if tuning_midi is None or freq is None:
-            self.str_cents_lbl.configure(text='')
-            return
-
-        str_idx, cents = closest_string(freq, tuning_midi, a4=self.a4.get())
-        if str_idx is None:
-            self.str_cents_lbl.configure(text='')
-            return
-
-        # Colour: green if within 5c, yellow within 20c, red otherwise
+    def _tuner_colors(self, cents):
+        """(background, highlight, text) for how far off a string is."""
         if abs(cents) < 5:
-            bg_col = ACCENT_DIM; hl_col = ACCENT; fg_col = ACCENT
-        elif abs(cents) < 20:
-            bg_col = '#332800'; hl_col = '#ffd166'; fg_col = '#ffd166'
-        else:
-            bg_col = '#2d1010'; hl_col = RED; fg_col = RED
+            return ACCENT_DIM, ACCENT, ACCENT
+        if abs(cents) < 20:
+            return '#332800', '#ffd166', '#ffd166'
+        return '#2d1010', RED, RED
 
-        box = self.str_boxes[str_idx]
-        lbl = self.str_labels[str_idx]
-        box.configure(bg=bg_col, highlightbackground=hl_col)
-        lbl.configure(bg=bg_col, fg=fg_col)
-
+    def _show_string_readout(self, str_idx, cents):
+        """Highlight one string box and show how far it is from its target."""
+        self._clear_string_readout()
+        tuning = ALL_TUNINGS.get(self.tuning_var.get())
+        if not tuning or str_idx is None or str_idx >= len(self.str_boxes):
+            return
+        bg_col, hl_col, fg_col = self._tuner_colors(cents)
+        self.str_boxes[str_idx].configure(bg=bg_col, highlightbackground=hl_col)
+        self.str_labels[str_idx].configure(bg=bg_col, fg=fg_col)
         dir_arrow = '▲' if cents > 0 else ('▼' if cents < 0 else '')
         self.str_cents_lbl.configure(
-            text=f"str {6-str_idx}  {cents:+.0f}¢ {dir_arrow}",
-            fg=fg_col)
+            text=f"str {len(tuning) - str_idx}  {cents:+.0f}¢ {dir_arrow}", fg=fg_col)
+
+    def _apply_tuner_range(self):
+        """Search only the range the selected tuning can produce: that
+        stops harmonics and noise being reported as notes. Chromatic mode
+        keeps the wide per-instrument range."""
+        tm = GUITAR_TUNING_MIDI.get(self.tuning_var.get())
+        if tm:
+            self.tuner.fmin, self.tuner.fmax = tuning_search_range(tm, self.a4.get())
+        else:
+            is_bass = self.instrument_var.get() == 'bass'
+            self.tuner.fmin = 24.0 if is_bass else 40.0
+            self.tuner.fmax = 600.0 if is_bass else 1500.0
+        self.tuner._hist.clear()
+
+    def _tuner_snap(self, freq, tuning_midi):
+        """Pick which string a detected pitch belongs to, steadily: once a
+        string is showing, a different one only takes over after it wins
+        three readings in a row (~0.3 s), so a stray overtone or the pluck
+        transient can't flick the display around. Returns (idx, cents), the
+        string 'hold' while a challenger is still being confirmed, or None
+        when there is no pitch."""
+        if freq is None:
+            self._tn_silent += 1
+            if self._tn_silent > 8:                  # ~0.7 s of nothing: forget the string
+                self._tn_idx = None; self._tn_cand = None; self._tn_cand_n = 0
+            return None
+        self._tn_silent = 0
+        idx, cents = closest_string_folded(freq, tuning_midi, self.a4.get())
+        if self._tn_idx is None or idx == self._tn_idx:
+            self._tn_idx = idx; self._tn_cand = None; self._tn_cand_n = 0
+            return idx, cents
+        if idx == self._tn_cand:
+            self._tn_cand_n += 1
+        else:
+            self._tn_cand, self._tn_cand_n = idx, 1
+        if self._tn_cand_n >= 3:
+            self._tn_idx = idx; self._tn_cand = None; self._tn_cand_n = 0
+            return idx, cents
+        return 'hold'
+
+    def _tuner_show(self, name, freq, cents):
+        self.foot_note.configure(text=name)
+        self.foot_freq.configure(text=f"{freq:.1f} Hz")
+        self.foot_cents.configure(text=f"{cents:+.0f}¢")
+        self._draw_gauge(max(-50, min(50, cents)))
+        if abs(cents) < 5:
+            self.foot_status.configure(text='In tune ✓', fg=ACCENT)
+        else:
+            self.foot_status.configure(text='sharp ▲' if cents > 0 else 'flat ▼', fg=DIM)
+
+    def _tuner_update(self):
+        """One tuner refresh. With a tuning selected the reading snaps to
+        that tuning's strings (E when you play E, however far off); with
+        'None (chromatic)' it shows the raw nearest note."""
+        if not self.tuner.running:
+            return
+        freq = self.tuner.pitch()
+        tuning_name = self.tuning_var.get()
+        tuning = ALL_TUNINGS.get(tuning_name)
+        if tuning:
+            snap = self._tuner_snap(freq, GUITAR_TUNING_MIDI[tuning_name])
+            if snap == 'hold':
+                return
+            if snap is None:
+                self.foot_status.configure(text='Listening… (play a string)', fg=DIM)
+                if self._tn_idx is None:
+                    self._clear_string_readout()
+                return
+            idx, cents = snap
+            note, octave = tuning[idx]
+            if tuning_name in GUITAR_TUNING_USE_FLATS:
+                note = NOTE_NAMES_FLAT[NOTE_NAMES.index(note)]
+            self._tuner_show(f"{note}{octave}", freq, cents)
+            self._show_string_readout(idx, cents)
+            return
+        tr = TRANSPOSITIONS.get(self.trans_var.get(), 0)
+        r  = analyze_pitch(freq, a4=self.a4.get(), transpose=tr)
+        if r:
+            self._tuner_show(f"{r['name']}{r['octave']}", r['freq'], r['cents'])
+        else:
+            self.foot_status.configure(text='Listening… (play a note)', fg=DIM)
+        self._clear_string_readout()
 
     def _poll_tuner(self):
-        if self.tuner.running:
-            tr   = TRANSPOSITIONS.get(self.trans_var.get(), 0)
-            freq = self.tuner.pitch()
-            r    = analyze_pitch(freq, a4=self.a4.get(), transpose=tr)
-            if r:
-                self.foot_note.configure(text=f"{r['name']}{r['octave']}")
-                self.foot_freq.configure(text=f"{r['freq']:.1f} Hz")
-                self.foot_cents.configure(text=f"{r['cents']:+.0f}¢")
-                self._draw_gauge(r['cents'])
-                if abs(r['cents']) < 5:
-                    self.foot_status.configure(text='In tune ✓', fg=ACCENT)
-                else:
-                    self.foot_status.configure(
-                        text='sharp ▲' if r['cents']>0 else 'flat ▼', fg=DIM)
-                self._update_string_readout(freq)
-            else:
-                self.foot_status.configure(text='Listening… (play a note)', fg=DIM)
-                self._update_string_readout(None)
+        self._tuner_update()
         self.after(90, self._poll_tuner)
 
     # ── session persistence ───────────────────────────────────
@@ -5135,10 +6271,13 @@ class App(tk.Tk):
             if 'loop_layers' in s: self.loop_layers_var.set(s['loop_layers'])
             if 'loop_mode' in s: self.loop_mode_var.set(s['loop_mode'])
             if 'tuning' in s: self._restore_tuning(s['tuning'])
+            if 'master_db' in s and hasattr(self, 'master_sl'):
+                m = min(max(float(s['master_db']), MASTER_RANGE_DB[0]), MASTER_RANGE_DB[1])
+                self.amp.master_gain = 10 ** (m / 20.0)
+                self._set_knob(self.master_sl, self.master_val, m, f'{m:+.1f} dB')
             if 'pedal_order' in s:
-                order = s['pedal_order']
-                if (isinstance(order, list)
-                        and sorted(order) == sorted(self.amp.pedals.order)):
+                order = normalize_order(s['pedal_order'])
+                if order is not None:
                     self.amp.pedals.order = order
                     self._relayout_pedals()
             if 'ir_labels' in s:
@@ -5163,6 +6302,14 @@ class App(tk.Tk):
             if 'lpd8_led_on' in s and hasattr(self, 'lpd8_led_var'):
                 self.lpd8_led_var.set(bool(s['lpd8_led_on']))
                 self._lpd8_refresh_leds(force=True)
+            if isinstance(s.get('rec_dir'), str) and s['rec_dir']:
+                self._rec_dir = s['rec_dir']
+                self._rec_refresh_dir_label()
+            if 'rec_dry' in s:     self.rec_dry_var.set(bool(s['rec_dry']))
+            if 'rec_loop' in s:    self.rec_loop_var.set(bool(s['rec_loop']))
+            if 'reamp_norm' in s:  self.reamp_norm_var.set(bool(s['reamp_norm']))
+            if isinstance(s.get('reamp_dir'), str) and s['reamp_dir']:
+                self._reamp_dir = s['reamp_dir']
             if 'last_nam_dir' in s and s['last_nam_dir'] and pathlib.Path(s['last_nam_dir']).is_dir():
                 self._last_nam_dir = s['last_nam_dir']
             if 'last_ir_dir' in s and s['last_ir_dir'] and pathlib.Path(s['last_ir_dir']).is_dir():
@@ -5230,6 +6377,12 @@ class App(tk.Tk):
                 'ir_labels':   [v.get() for v in self.ir_label_vars],
                 'blocksize':   self.bs_var.get(),
                 'tuning':      self.tuning_var.get(),
+                'master_db':   20.0 * math.log10(max(1e-9, self.amp.master_gain)),
+                'rec_dir':     self._rec_dir,
+                'rec_dry':     self.rec_dry_var.get(),
+                'rec_loop':    self.rec_loop_var.get(),
+                'reamp_norm':  self.reamp_norm_var.get(),
+                'reamp_dir':   self._reamp_dir,
                 'pedal_mute':  self.amp.pedals.mute,
                 'pedal_order': self.amp.pedals.order,
                 'dly_link':    self.dly_link_var.get(),
@@ -5671,13 +6824,19 @@ class App(tk.Tk):
         down = ttk.Button(row, text='▼ Move down', width=13,
                            command=lambda: self._move_fx(name, 1))
         down.pack(side='right', padx=(4,0))
-        self._fx_rows[name] = dict(pos_var=pos_var, up=up, down=down)
+        side = ttk.Button(row, text='', width=16,
+                           command=lambda: self._toggle_fx_side(name))
+        side.pack(side='right', padx=(4,0))
+        self._fx_rows[name] = dict(pos_var=pos_var, up=up, down=down, side=side)
 
     def _reset_pedal_order(self):
         self.amp.pedals.order = list(DEFAULT_PEDAL_ORDER)
         self._relayout_pedals()
 
     def _move_fx(self, name, delta):
+        """Swap a pedal with its neighbour in the chain. The 'amp' marker is
+        part of the same list, so moving a pedal past it moves that pedal
+        from before the amp to after it (or back)."""
         order = self.amp.pedals.order
         i = order.index(name)
         j = i + delta
@@ -5686,26 +6845,62 @@ class App(tk.Tk):
         order[i], order[j] = order[j], order[i]
         self._relayout_pedals()
 
+    def _toggle_fx_side(self, name):
+        """Send a pedal to the other side of the amp, placing it right next
+        to the amp marker (nearest where it just was)."""
+        order = self.amp.pedals.order
+        was_post = order.index(name) > order.index(AMP_MARKER)
+        order.remove(name)
+        a = order.index(AMP_MARKER)
+        order.insert(a if was_post else a + 1, name)
+        self._relayout_pedals()
+
     def _relayout_pedals(self):
         """Re-pack the reorderable pedal sections to match amp.pedals.order
         (mute is pinned above all of them, so it's untouched here), and
-        refresh each section's position label and Move up/down buttons."""
+        refresh each section's position label and Move up/down buttons.
+        The order also holds the 'amp' marker: it has no section of its
+        own, but it splits the pedals into pre-amp and post-amp, which each
+        section's label, its side button and the status strip all show."""
         order = self.amp.pedals.order
-        for name in order:
+        amp_i = order.index(AMP_MARKER) if AMP_MARKER in order else len(order)
+        pedals = [n for n in order if n != AMP_MARKER]
+        for name in pedals:
             self._fx_outer[name].pack_forget()
-        for name in order:
+        for name in pedals:
             self._fx_outer[name].pack(fill='x', padx=8, pady=6)
         n = len(order)
         for idx, name in enumerate(order):
+            if name == AMP_MARKER:
+                continue
+            post = idx > amp_i
+            side_list = order[amp_i + 1:] if post else order[:amp_i]
             row = self._fx_rows[name]
-            row['pos_var'].set(f'Chain position {idx+1} of {n}')
+            row['pos_var'].set(
+                f"{'Post-amp' if post else 'Pre-amp'} · "
+                f"{side_list.index(name) + 1} of {len(side_list)}  "
+                f"({'after the amp, cab and EQ' if post else 'ahead of the amp'})")
+            row['side'].configure(text=('← Move pre-amp' if post else 'Move post-amp →'))
             row['up'].configure(state=('disabled' if idx == 0 else 'normal'))
             row['down'].configure(state=('disabled' if idx == n - 1 else 'normal'))
-        # The status-strip icons mirror the same order, top of the tab.
+        # The status-strip cells mirror the same order, top of the tab,
+        # amp marker included, each pedal tagged PRE or POST.
         for name in order:
-            self._pedal_icon_cells[name].pack_forget()
-        for name in order:
-            self._pedal_icon_cells[name].pack(side='left', padx=6)
+            cell = self._pedal_icon_cells.get(name)
+            if cell is not None:
+                cell.pack_forget()
+        for idx, name in enumerate(order):
+            cell = self._pedal_icon_cells.get(name)
+            if cell is None:
+                continue
+            cell.pack(side='left', padx=6)
+            if name == AMP_MARKER:
+                continue
+            post = idx > amp_i
+            lbl = self._pedal_side_lbls.get(name)
+            if lbl is not None:
+                lbl.configure(text=('POST-AMP' if post else 'PRE-AMP'),
+                              fg=(ACCENT if post else DIM))
 
     # Clickable hit-box for the status-strip LED, in the icon canvas's own
     # coordinates — a few px bigger than the drawn oval (w-16,4 to w-4,16)
@@ -5728,18 +6923,37 @@ class App(tk.Tk):
         rounded-button skin."""
         self._pedal_icon_cells = {}
         self._pedal_led_ids = {}
+        self._pedal_side_lbls = {}
         if not HAS_PIL:
             return
         sec = self._sec(parent, 'Pedal Status')
         strip = tk.Frame(sec, bg=PANEL)
         strip.pack(fill='x', padx=10, pady=8)
+        tk.Label(sec, text='Signal flows left → right. Pedals before AMP run into the amp; '
+                           'pedals after it run on the amp + cab + EQ output.',
+                 bg=PANEL, fg=DIM, font=(FF,9), anchor='w').pack(fill='x', padx=10, pady=(0,8))
         x0, y0, x1, y1 = self._PEDAL_LED_HITBOX
         for code in self.amp.pedals.order:
+            w, h = PEDAL_ICON_SIZE
+            if code == AMP_MARKER:
+                # Not a pedal: a fixed block marking where the NAM amp, cab IR
+                # and EQ sit between the two groups. No LED, nothing to click.
+                cell = tk.Frame(strip, bg=PANEL)
+                c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0)
+                c.pack()
+                c.create_rectangle(2, 2, w - 2, h - 2, fill='#151515', outline=ACCENT, width=2)
+                c.create_oval(w // 2 - 14, 10, w // 2 + 14, 38, outline=ACCENT, width=2)
+                c.create_oval(w // 2 - 5, 19, w // 2 + 5, 29, fill=ACCENT, outline='')
+                c.create_text(w // 2, h - 22, text='AMP', fill=ACCENT, font=(FF, 10, 'bold'))
+                c.create_text(w // 2, h - 9, text='CAB · EQ', fill=DIM, font=(FF, 7))
+                tk.Label(cell, text='NAM', bg=PANEL, fg=DIM, font=(FF, 7)).pack()
+                cell.pack(side='left', padx=6)
+                self._pedal_icon_cells[code] = cell
+                continue
             photo = _get_pedal_icon_photo(code)
             if photo is None:
                 continue
             cell = tk.Frame(strip, bg=PANEL)
-            w, h = PEDAL_ICON_SIZE
             c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0,
                           cursor='hand2')
             c.pack()
@@ -5751,8 +6965,11 @@ class App(tk.Tk):
                 else:
                     self._jump_to_pedal_section(code)
             c.bind('<Button-1>', _on_click)
+            side_lbl = tk.Label(cell, text='', bg=PANEL, fg=DIM, font=(FF, 7))
+            side_lbl.pack()
             cell.pack(side='left', padx=6)
             self._pedal_icon_cells[code] = cell
+            self._pedal_side_lbls[code] = side_lbl
             self._pedal_led_ids[code] = (c, led)
         self._refresh_all_pedal_leds()
 
@@ -5845,6 +7062,11 @@ class App(tk.Tk):
                                         'The amp is still running. Quit anyway?'):
                 return
         self._save_session()
+        try:
+            if self._rec is not None:
+                self._rec_stop()
+        except Exception:
+            pass
         try:
             self.metro.stop(); self.tuner.stop()
             self.tone.stop();  self.amp.stop()

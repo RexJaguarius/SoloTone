@@ -22,7 +22,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import numpy as np
-from pedals import PedalChain
+from pedals import PedalChain, DEFAULT_PEDAL_ORDER, AMP_MARKER, normalize_order
 
 SR = 44100
 BLOCK = 256
@@ -143,6 +143,7 @@ def test_full_chain_all_pedals_engaged():
         if take < BLOCK:
             block = np.pad(block, (0, BLOCK - take))
         y = p.process(block, metro_bpm=120)
+        y = p.process_post(y, metro_bpm=120)   # the post-amp half of the chain
         out[pos:pos + take] = y[:take]
         pos += take
     assert_sane(out, 'full chain, all 8 pedals engaged')
@@ -172,6 +173,65 @@ def test_fuzz_mode_switching_mid_stream_is_stable():
         pos += take
         i += 1
     assert_sane(out, 'fuzz mode/tone switched every block')
+
+
+def _run_blocks(fn, signal):
+    out = np.zeros(len(signal), dtype=np.float64)
+    for pos in range(0, len(signal) - BLOCK + 1, BLOCK):
+        out[pos:pos + BLOCK] = fn(signal[pos:pos + BLOCK])
+    return out
+
+
+def test_default_order_puts_time_effects_after_amp():
+    assert DEFAULT_PEDAL_ORDER.count(AMP_MARKER) == 1
+    i = DEFAULT_PEDAL_ORDER.index(AMP_MARKER)
+    assert set(DEFAULT_PEDAL_ORDER[:i]) == {'comp', 'wah', 'fuzz', 'dist', 'od'}
+    assert set(DEFAULT_PEDAL_ORDER[i + 1:]) == {'chorus', 'delay', 'reverb'}
+
+
+def test_pre_and_post_stages_only_run_their_own_pedals():
+    sig = _SIGNAL[:BLOCK * 20]
+    # a delay alone, placed after the amp: process() must leave the signal
+    # untouched, process_post() must change it.
+    p = PedalChain(sr=SR)
+    p.delay_on = True; p.delay_time = 0.05; p.delay_mix = 0.5
+    pre = _run_blocks(lambda b: p.process(b), sig)
+    assert np.allclose(pre, sig, atol=1e-6), 'a post-amp delay altered the pre-amp stage'
+    post = _run_blocks(lambda b: p.process_post(b), sig)
+    assert not np.allclose(post, sig, atol=1e-3), 'a post-amp delay did nothing in the post stage'
+    # same delay moved ahead of the amp marker: now process() applies it
+    # and process_post() leaves the signal alone.
+    p2 = PedalChain(sr=SR)
+    p2.delay_on = True; p2.delay_time = 0.05; p2.delay_mix = 0.5
+    p2.order = ['delay', AMP_MARKER] + [c for c in DEFAULT_PEDAL_ORDER if c not in ('delay', AMP_MARKER)]
+    pre2 = _run_blocks(lambda b: p2.process(b), sig)
+    assert not np.allclose(pre2, sig, atol=1e-3)
+    post2 = _run_blocks(lambda b: p2.process_post(b), sig)
+    assert np.allclose(post2, sig, atol=1e-6)
+
+
+def test_mute_silences_both_stages():
+    p = PedalChain(sr=SR)
+    p.mute = True
+    p.reverb_on = True
+    blk = _SIGNAL[:BLOCK]
+    assert not np.any(p.process(blk))
+    assert not np.any(p.process_post(blk))
+
+
+def test_normalize_order_keeps_legacy_orders_pre_amp():
+    legacy_default = ['comp', 'wah', 'fuzz', 'dist', 'od', 'chorus', 'delay', 'reverb']
+    # untouched factory order -> upgraded to the new default
+    assert normalize_order(legacy_default) == DEFAULT_PEDAL_ORDER
+    # a customised old order stays exactly as it was, all before the amp
+    custom = ['comp', 'od', 'chorus', 'delay', 'reverb', 'wah', 'fuzz', 'dist']
+    assert normalize_order(custom) == custom + [AMP_MARKER]
+    # current-format orders pass through unchanged
+    assert normalize_order(DEFAULT_PEDAL_ORDER) == DEFAULT_PEDAL_ORDER
+    # junk is rejected
+    assert normalize_order(['comp', 'wah']) is None
+    assert normalize_order('comp') is None
+    assert normalize_order(DEFAULT_PEDAL_ORDER + [AMP_MARKER]) is None
 
 
 if __name__ == '__main__':

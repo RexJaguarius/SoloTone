@@ -10,7 +10,7 @@ app — exactly what the build-75 Fuzz/Distortion artifacting fix relied
 on (capturing real guitar audio and running it straight through
 PedalChain's own methods, block by block, outside the GUI entirely).
 
-Public API: PedalChain, DEFAULT_PEDAL_ORDER. Everything else here
+Public API: PedalChain, DEFAULT_PEDAL_ORDER, AMP_MARKER, normalize_order. Everything else here
 (_SVF, Oversampler, DCBlocker, _hard_clip/_soft_clip/_asymmetric_clip,
 _muff_tone) is an internal implementation detail PedalChain itself
 uses — nothing outside this module ever referenced them directly, so
@@ -242,19 +242,59 @@ def _muff_tone(x, mode, sr=44100, zi=None):
 # literal could. Also the order MIDI_MAPPABLE_TARGETS' pedal-related
 # entries are listed in, so the Settings tab's MIDI list reads in the
 # same sequence as the actual signal chain.
-DEFAULT_PEDAL_ORDER = ['comp', 'wah', 'fuzz', 'dist', 'od', 'chorus', 'delay', 'reverb']
+#
+# 'amp' is not a pedal: it's a marker for where the NAM amp + cab IR + EQ
+# sit in the chain. Everything BEFORE it runs ahead of the amp
+# (PedalChain.process — drive/fuzz/wah/compressor, which want to hit the
+# amp's input), everything AFTER it runs on the amp's output
+# (PedalChain.process_post — time-based effects, which on a real rig sit
+# in the effects loop or on the board after the amp; run ahead of a
+# distorted amp, delay repeats and reverb tails get crushed and smeared
+# by it). Default: chorus, delay and reverb after the amp.
+AMP_MARKER = 'amp'
+DEFAULT_PEDAL_ORDER = ['comp', 'wah', 'fuzz', 'dist', 'od',
+                       AMP_MARKER,
+                       'chorus', 'delay', 'reverb']
+
+# The order before the amp marker existed — every pedal ahead of the amp.
+# Kept so normalize_order() can tell "a saved order the user never
+# customised" (upgrade it to the new default) from "a custom order"
+# (keep it exactly as it was, all pedals pre-amp, so a saved profile
+# sounds the same as it always did).
+_LEGACY_DEFAULT_ORDER = ['comp', 'wah', 'fuzz', 'dist', 'od', 'chorus', 'delay', 'reverb']
+
+
+def normalize_order(order):
+    """Validate a chain order from a saved profile/session and bring it up
+    to the current format. Returns the list to use, or None if it isn't a
+    valid permutation of the pedals. An order without the 'amp' marker
+    (anything saved before post-amp effects existed) keeps every pedal
+    ahead of the amp, exactly as it was — except the untouched factory
+    order, which is upgraded to the new default."""
+    if not isinstance(order, list) or order.count(AMP_MARKER) > 1:
+        return None
+    pedals = [c for c in order if c != AMP_MARKER]
+    if sorted(pedals) != sorted(c for c in DEFAULT_PEDAL_ORDER if c != AMP_MARKER):
+        return None
+    if AMP_MARKER not in order:
+        if order == _LEGACY_DEFAULT_ORDER:
+            return list(DEFAULT_PEDAL_ORDER)
+        return list(order) + [AMP_MARKER]
+    return list(order)
 
 
 class PedalChain:
     """
-    Pre-NAM effects chain, processed sample-accurately in the amp callback.
+    Effects chain around the NAM amp, processed sample-accurately in the amp
+    callback: process() runs the pedals ahead of the amp marker in
+    self.order, process_post() the ones after it.
     All parameters are plain Python attributes — set from the GUI thread;
     reads in the audio thread are safe because Python attribute access is
     atomic for simple types.
 
-    Signal order:
+    Default signal order:
         [mute] → compressor → wah → fuzz → distortion → overdrive/boost
-               → chorus/flanger → delay → reverb  → output
+               → AMP + CAB + EQ → chorus/flanger → delay → reverb → output
     """
     def __init__(self, sr=44100):
         self.sr = sr
@@ -263,9 +303,10 @@ class PedalChain:
         self.mute         = False
 
         # ── chain order ──────────────────────────────────────
-        # User-reorderable stomp order (mute is a global kill switch, not
-        # part of the chain, so it isn't in this list). Rearranged from the
-        # Pedals tab with the Move up/down buttons.
+        # User-reorderable stomp order, including the 'amp' marker that
+        # splits pre-amp from post-amp pedals (mute is a global kill
+        # switch, not part of the chain, so it isn't in this list).
+        # Rearranged from the Pedals tab with the Move up/down buttons.
         self.order        = list(DEFAULT_PEDAL_ORDER)
 
         # ── compressor (tube-style) ────────────────────────────
@@ -646,19 +687,41 @@ class PedalChain:
         'reverb':  '_fx_reverb',
     }
 
-    def process(self, x, metro_bpm=120):
-        """x: np.float32[N]. Returns np.float32[N].
-        Effects run in self.order — user-reorderable from the Pedals tab."""
-        self._delay_bpm = metro_bpm
-        y = x.astype(np.float64)
+    def _split_order(self):
+        """(pre, post) pedal lists either side of the amp marker. An order
+        with no marker (set directly, bypassing normalize_order) is treated
+        as all-pre-amp, the behaviour before post-amp effects existed."""
+        order = self.order
+        if AMP_MARKER in order:
+            i = order.index(AMP_MARKER)
+            return order[:i], order[i + 1:]
+        return list(order), []
 
-        if self.mute:
-            return np.zeros(len(x), dtype=np.float32)
-
-        for name in self.order:
+    def _run(self, y, names):
+        for name in names:
             method = self._FX_FUNCS.get(name)
             if method is not None:
                 y = getattr(self, method)(y)
-
         np.clip(y, -1, 1, out=y)
         return y.astype(np.float32)
+
+    def process(self, x, metro_bpm=120):
+        """Pre-amp stage. x: np.float32[N]. Returns np.float32[N].
+        Runs the effects ahead of the 'amp' marker in self.order —
+        user-reorderable from the Pedals tab."""
+        self._delay_bpm = metro_bpm
+        if self.mute:
+            return np.zeros(len(x), dtype=np.float32)
+        return self._run(x.astype(np.float64), self._split_order()[0])
+
+    def process_post(self, x, metro_bpm=120):
+        """Post-amp stage, run on the amp/cab/EQ output. x: np.float32[N].
+        Runs the effects after the 'amp' marker. Mute silences this stage
+        too, so MUTE still means silence, not a ringing reverb tail."""
+        self._delay_bpm = metro_bpm
+        post = self._split_order()[1]
+        if self.mute:
+            return np.zeros(len(x), dtype=np.float32)
+        if not post:
+            return x
+        return self._run(x.astype(np.float64), post)
