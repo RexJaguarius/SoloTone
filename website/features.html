@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Features — SoloTone</title>
-<meta name="description" content="A tour of everything SoloTone does: amp and cabinet modeling, a full pedalboard, a ten-layer looper, an always-on tuner, a sample-accurate metronome, MIDI control, and recallable Tone Profiles.">
+<meta name="description" content="SoloTone in detail: NAM WaveNet inference, FFT cab convolution, a pre/post-amp pedal chain, wet and dry recording with offline re-amp, a sample-locked looper, a tuning-aware tuner, MIDI mapping and JSON Tone Profiles.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="styles.css">
@@ -44,6 +44,10 @@
       <line x1="60" y1="60" x2="76" y2="31" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
       <circle cx="60" cy="60" r="6.5" fill="#1f7e89"/>
     </symbol>
+    <symbol id="i-rec" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="32" fill="none" stroke="#adadad" stroke-width="4"/>
+      <circle cx="60" cy="60" r="14" fill="#1f7e89"/>
+    </symbol>
     <symbol id="i-metro" viewBox="0 0 120 120">
       <path d="M40 100 L52 28 L68 28 L80 100 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
       <line x1="60" y1="92" x2="73" y2="40" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
@@ -71,6 +75,7 @@
   <nav class="site-nav">
     <a href="index.html">Home</a>
     <a href="features.html" class="active">Features</a>
+    <a href="specs.html">Specs</a>
     <a href="about.html">About</a>
     <a href="download.html">Download</a>
     <a href="contact.html">Contact</a>
@@ -82,12 +87,12 @@
 
   <section style="padding-bottom:0">
     <span class="eyebrow">What's inside</span>
-    <h1 style="font-size:clamp(2.2rem,5.5vw,3.4rem); max-width:20ch; margin-top:10px;">
-      A whole rig, none of it plugged into anything but itself.
+    <h1 style="font-size:clamp(2.2rem,5.5vw,3.4rem); max-width:22ch; margin-top:10px;">
+      Signal path, DSP and I/O in detail.
     </h1>
-    <p style="color:var(--muted); font-size:1.05rem; max-width:60ch; margin-top:14px;">
-      Every tool below runs at once, sharing the same signal, so switching tabs never means
-      switching rigs.
+    <p style="color:var(--muted); font-size:1.05rem; max-width:62ch; margin-top:14px;">
+      Every tool below shares one audio callback. The measurements, formats and rates behind
+      these descriptions are on the <a href="specs.html" style="color:var(--accent)">Specs</a> page.
     </p>
   </section>
 
@@ -99,14 +104,9 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-amp"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>An amp rig with no amp</h3>
-        <p>Load a captured amp tone, drop in a cabinet, and shape it with a 5-band EQ
-          plus a dedicated output Level fader — all before the signal ever leaves your
-          laptop. A built-in noise gate and hum filter keep things quiet between phrases,
-          and input/output gain make it easy to match whatever you're plugging in. Blend
-          two cabinet IRs together instead of just switching between them, and hit the
-          one-button Panic switch any time you need dead silence, instantly.</p>
-        <div class="feature-stat">5 cabinet slots · IR blending · 5-band EQ · noise gate &amp; hum filter · Panic mute</div>
+        <h3>NAM inference, cab convolution, EQ</h3>
+        <p>Neural Amp Modeler captures run through a from-scratch WaveNet engine in NumPy (A1 and A2 exports, SlimmableContainer), then up to five cab IRs by overlap-add FFT convolution with A/B switching or a continuous blend, and a five-band biquad EQ with a level trim. Input gain, a block-RMS noise gate (3 ms attack, 60 ms release) and a mains-hum notch filter sit ahead of the model. Match level renders a synthetic playing signal through the chain and sets Output Gain so every sound lands at &minus;18 dBFS RMS; a global Master Volume trims the monitors without touching a profile.</p>
+        <div class="feature-stat">WaveNet NAM · 5 IR slots · A/B + blend · 5 biquads · level matching · Master Volume</div>
       </div>
     </div>
 
@@ -117,15 +117,9 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-pedal"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>A pedalboard that never needs new batteries</h3>
-        <p>A tube-style compressor, wah (manual or auto-sweep), fuzz, four distortion voicings
-          (Boss DS-1, RAT, Distortion+, Metal), overdrive with a transparent Klon mode, chorus,
-          flanger, delay, and reverb — each with its own on/off switch. Build the board you'd
-          actually save up for, then click effects in and out without ever standing up — and
-          restack the order any way you like, because a wah before a fuzz and a wah after it
-          are two completely different pedals. Found a fuzz setting worth keeping? Save just
-          that pedal as its own mini-preset and reuse it on a completely different sound later.</p>
-        <div class="feature-stat">8 effects · reorderable chain · tap-tempo delay · per-pedal presets</div>
+        <h3>Pedal chain around an AMP marker</h3>
+        <p>Compressor (soft-knee, tube-style saturation), state-variable wah, Fuzz Face / Big Muff, four distortion voicings, overdrive with a Klon mode, chorus/flanger, tape or digital delay and a Schroeder reverb. Clip stages run 4&times; oversampled to suppress aliasing. The order is free and splits at an AMP marker: pre-amp pedals feed the model, post-amp pedals process its output, so repeats and tails are not compressed by a distorted amp. Any pedal saves as a portable preset.</p>
+        <div class="feature-stat">8 effects · pre/post-amp · reorderable · tempo-synced delay · per-pedal presets</div>
       </div>
     </div>
 
@@ -136,12 +130,22 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-loop"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>Practice with a whole band, minus the band</h3>
-        <p>Lay down a rhythm part, then a lead, then a harmony, and hear all three come back
-          at once — through your full tone, not a separate recording. Manual mode for full
-          control, or Auto mode to record hands-free, layer after layer. Mute any layer on
-          the fly, or export one — or the whole mix — straight to a WAV file.</p>
-        <div class="feature-stat">10 layers · manual or auto · per-layer mute · export to WAV</div>
+        <h3>Sample-locked looper</h3>
+        <p>Up to ten layers of 1&ndash;60 s, recorded from the processed output and locked to a shared sample count, so layers cannot drift. Manual mode, or Auto mode for hands-free layering; per-layer mute, and export of a layer or the whole mix to WAV.</p>
+        <div class="feature-stat">10 layers · 1–60 s · manual or auto · per-layer mute · WAV export</div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-plate">
+        <span class="screw tl"></span><span class="screw tr"></span>
+        <span class="screw bl"></span><span class="screw br"></span>
+        <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-rec"/></svg>
+      </div>
+      <div class="feature-copy">
+        <h3>Wet and dry recording, offline re-amp</h3>
+        <p>REC in the footer of every tab writes two sample-aligned mono 32-bit float WAVs: the processed sound and the raw dry input. The tap sits after Output Gain but before Master Volume and the metronome click, and disk writes happen on a separate thread, so the audio callback never blocks. Both files open directly in Audacity, Adobe Audition or any DAW. Re-amp then runs any WAV (any rate or bit depth) through the current chain offline, at about 1.4&times; real time on the heaviest chain tested.</p>
+        <div class="feature-stat">wet + dry · 32-bit float · re-amp any WAV · footswitch-mappable</div>
       </div>
     </div>
 
@@ -152,12 +156,9 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-tuner"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>Always in tune, never in the way</h3>
-        <p>A tuner strip lives at the bottom of the screen no matter which tab you're on —
-          no clip-on, no separate app. Pick from 14 alternate guitar tunings and it'll tell
-          you exactly which string needs love, and by how much. A Guitar/Bass toggle swaps
-          in 4- and 5-string bass tunings and retunes the detector's range to match.</p>
-        <div class="feature-stat">14 guitar tunings · 4/5-string bass · sub-cent accuracy</div>
+        <h3>Tuning-aware pitch detection</h3>
+        <p>A McLeod normalized square-difference detector with parabolic interpolation: loudness-independent, so low-output single-coil pickups work, with mains hum subtracted by least squares before detection. Pick one of 14 guitar tunings (or 4/5-string bass) and readings snap to that tuning's strings, octave-insensitively and with hysteresis; chromatic mode shows the raw nearest note.</p>
+        <div class="feature-stat">14 guitar tunings · 4/5-string bass · NSDF · hum-subtracted · 0.07 cent mean error (synthetic)</div>
       </div>
     </div>
 
@@ -168,11 +169,9 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-metro"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>The one bandmate who's always on time</h3>
-        <p>Five click sounds, tap tempo, and every time signature you'd actually use — with
-          timing locked to the sample, so it never drifts even if your computer is busy doing
-          something else.</p>
-        <div class="feature-stat">5 sound kits · 30–250 BPM</div>
+        <h3>Sample-accurate metronome</h3>
+        <p>Five click kits, tap tempo and every common time signature, scheduled inside the audio callback itself, so timing is locked to the sample and independent of GUI or CPU load.</p>
+        <div class="feature-stat">5 kits · 30–250 BPM · scheduled in the callback</div>
       </div>
     </div>
 
@@ -183,14 +182,9 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-midi"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>Drive the whole rig from a real controller</h3>
-        <p>Plug in any class-compliant USB-MIDI pad/knob controller and map its knobs and
-          pads to almost anything — pedal on/off, drive and mix knobs, amp gain, tap tempo,
-          loop record, cabinet A/B — with a simple "Learn" click, no hardcoded device
-          required. No MIDI gear on hand? Every mappable control has a keyboard shortcut
-          too. On an Akai LPD8 mk2 specifically, its pads can even light up to show what's
-          currently on.</p>
-        <div class="feature-stat">~40 mappable controls · keyboard shortcuts · pad LED feedback</div>
+        <h3>MIDI and keyboard mapping</h3>
+        <p>Learn-mode mapping of any class-compliant USB-MIDI controller: knobs drive continuous parameters, pads act as footswitches (a long press does a secondary action). 46 controls are MIDI-mappable and 67 keyboard-mappable, covering pedal switches and knobs, gains, tap tempo, looper, recording, IR A/B and blend. Akai LPD8 mk2 pads can mirror state with LED feedback.</p>
+        <div class="feature-stat">46 MIDI targets · 67 key targets · learn mode · LPD8 mk2 LEDs</div>
       </div>
     </div>
 
@@ -201,13 +195,9 @@
         <svg class="icon-lg" viewBox="0 0 120 120"><use href="#i-save"/></svg>
       </div>
       <div class="feature-copy">
-        <h3>Recall your exact sound, not close enough</h3>
-        <p>A Tone Profile captures the whole rig in one file — amp, cabinet, every pedal and
-          its settings, EQ, gain, tuning, all of it — so your clean tone and your lead tone
-          are both one click away instead of a five-minute re-dial. Tone Profiles are full
-          rigs; per-pedal presets are smaller and travel between them, so a favorite pedal
-          setting isn't locked inside whichever rig it was saved in.</p>
-        <div class="feature-stat">one-click recall · nothing re-dialed by hand</div>
+        <h3>JSON Tone Profiles</h3>
+        <p>A <span style="font-family:var(--f-mono)">.stprofile</span> is plain, versioned JSON holding the whole rig: model and IR paths, every pedal parameter and the chain order, EQ, gate, gains, hum filter, tuning, the pedals' MIDI mappings, and free-text notes for the guitar side (pickup, volume and tone settings). Per-pedal presets are smaller and move between profiles.</p>
+        <div class="feature-stat">versioned JSON · notes included · loads in one click</div>
       </div>
     </div>
   </section>
@@ -239,6 +229,7 @@
   <nav>
     <a href="index.html">Home</a>
     <a href="features.html">Features</a>
+    <a href="specs.html">Specs</a>
     <a href="about.html">About</a>
     <a href="download.html">Download</a>
     <a href="contact.html">Contact</a>

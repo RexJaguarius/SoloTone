@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SoloTone</title>
-<meta name="description" content="SoloTone turns your computer into an amp, a pedalboard, a looper, a tuner, and a metronome — one window, no cables, nothing sent anywhere but your own speakers.">
+<meta name="description" content="SoloTone: real-time Neural Amp Modeler rig in pure Python and NumPy. 44.1 kHz float32, FFT cab IRs, a pre/post-amp pedal chain, wet and dry WAV recording with offline re-amp, a looper, tuner and metronome. Every number published.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="styles.css">
@@ -44,6 +44,10 @@
       <line x1="60" y1="60" x2="76" y2="31" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
       <circle cx="60" cy="60" r="6.5" fill="#1f7e89"/>
     </symbol>
+    <symbol id="i-rec" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="32" fill="none" stroke="#adadad" stroke-width="4"/>
+      <circle cx="60" cy="60" r="14" fill="#1f7e89"/>
+    </symbol>
     <symbol id="i-metro" viewBox="0 0 120 120">
       <path d="M40 100 L52 28 L68 28 L80 100 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
       <line x1="60" y1="92" x2="73" y2="40" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
@@ -60,6 +64,7 @@
   <nav class="site-nav">
     <a href="index.html" class="active">Home</a>
     <a href="features.html">Features</a>
+    <a href="specs.html">Specs</a>
     <a href="about.html">About</a>
     <a href="download.html">Download</a>
     <a href="contact.html">Contact</a>
@@ -70,14 +75,25 @@
 <main class="container">
 
   <section class="hero">
-    <span class="eyebrow">For guitarists who practice alone</span>
-    <h1>Plug in. Everything else is already here.</h1>
-    <p class="lead">SoloTone turns the computer already on your desk into an amp, a pedalboard,
-      a looper, a tuner, and a metronome — one window, no cables to untangle, and nothing sent
-      anywhere but your own speakers.</p>
+    <span class="eyebrow">Real-time NAM rig &middot; pure Python + NumPy &middot; 44.1 kHz float32</span>
+    <h1>Real-time NAM rig. Every number published.</h1>
+    <p class="lead">SoloTone runs Neural Amp Modeler captures through FFT cab IRs, a five-band EQ and a pre/post-amp
+      pedal chain inside a single duplex audio callback &mdash; with wet and dry WAV recording and offline re-amping.
+      A 256-sample block is 5.8 ms; the whole chain averages about half of that budget on a modern desktop CPU.
+      No cloud, no account, no telemetry.</p>
     <div class="hero-ctas">
       <a class="btn btn-primary" href="download.html">Get SoloTone</a>
-      <a class="btn btn-ghost" href="features.html">See what's inside</a>
+      <a class="btn btn-ghost" href="specs.html">Read the specs</a>
+    </div>
+  </section>
+
+  <section style="padding-block:0 8px">
+    <div class="stat-strip">
+      <div class="stat"><b>44.1 kHz</b><span>float32 signal path</span></div>
+      <div class="stat"><b>1.8 ms</b><span>standard NAM per 256-sample block</span></div>
+      <div class="stat"><b>~1.4&times;</b><span>real-time offline re-amp</span></div>
+      <div class="stat"><b>10 &times; 60 s</b><span>sample-locked loop layers</span></div>
+      <div class="stat"><b>46</b><span>MIDI-mappable controls</span></div>
     </div>
   </section>
 
@@ -85,37 +101,44 @@
 
   <section>
     <div class="section-head">
-      <span class="eyebrow">The quick tour</span>
-      <h2>Five tools. One line in.</h2>
-      <p>Everything a bedroom rig needs, minus the bedroom rig.</p>
+      <span class="eyebrow">The signal path</span>
+      <h2>Six tools. One callback.</h2>
+      <p>The tuner, metronome, looper and recorder tap the amp's stream instead of opening their own,
+        so nothing competes for the audio device.</p>
     </div>
     <div class="tool-grid">
       <div class="tool-card">
         <svg class="icon" viewBox="0 0 120 120"><use href="#i-amp"/></svg>
         <h3>Amp &amp; Cabs</h3>
-        <p>Real amp modeling and cabinet tone, no hardware required.</p>
+        <p>WaveNet NAM inference in pure NumPy (A1/A2, Slimmable). Five FFT overlap-add cab IRs with A/B and blend, five-band biquad EQ, noise gate, hum notches.</p>
       </div>
       <div class="tool-card">
         <svg class="icon" viewBox="0 0 120 120"><use href="#i-pedal"/></svg>
         <h3>Pedals</h3>
-        <p>Wah, fuzz, drive, chorus, delay, reverb — stomp them in, out, and in any order.</p>
+        <p>Eight effects around an AMP marker, so each sits pre- or post-amp. 4&times; oversampled clippers, soft-knee compressor, Schroeder reverb.</p>
       </div>
       <div class="tool-card">
         <svg class="icon" viewBox="0 0 120 120"><use href="#i-loop"/></svg>
         <h3>Looper</h3>
-        <p>Stack up to ten layers and jam with a band made entirely of you.</p>
+        <p>Ten layers, 1&ndash;60 s, locked to the sample count so layers cannot drift. Records post-chain; per-layer mute and WAV export.</p>
+      </div>
+      <div class="tool-card">
+        <svg class="icon" viewBox="0 0 120 120"><use href="#i-rec"/></svg>
+        <h3>Recorder</h3>
+        <p>Wet and dry mono 32-bit float WAVs, tapped before Master Volume and the click. Re-amp any WAV offline through the current chain.</p>
       </div>
       <div class="tool-card">
         <svg class="icon" viewBox="0 0 120 120"><use href="#i-tuner"/></svg>
         <h3>Tuner</h3>
-        <p>Always on at the bottom of the screen, in 14 alternate tunings.</p>
+        <p>McLeod NSDF pitch detection with mains-hum subtraction. Snaps to the strings of the chosen tuning; 0.07 cent mean error on synthetic tones.</p>
       </div>
       <div class="tool-card">
         <svg class="icon" viewBox="0 0 120 120"><use href="#i-metro"/></svg>
         <h3>Metronome</h3>
-        <p>Five click sounds, tap tempo, and timing that never drifts.</p>
+        <p>Scheduled inside the audio callback: sample-accurate at 30&ndash;250 BPM regardless of CPU load.</p>
       </div>
     </div>
+    <p style="margin-top:22px"><a class="btn btn-ghost" href="specs.html">Formats, latency and processing cost &rarr;</a></p>
   </section>
 
   <section>
@@ -146,6 +169,7 @@
   <nav>
     <a href="index.html">Home</a>
     <a href="features.html">Features</a>
+    <a href="specs.html">Specs</a>
     <a href="about.html">About</a>
     <a href="download.html">Download</a>
     <a href="contact.html">Contact</a>

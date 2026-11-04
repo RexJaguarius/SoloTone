@@ -397,7 +397,7 @@ python tests/test_app_smoke.py       # builds the real window; needs a display
 
 That proves it launches and processes audio sanely on each OS; it can't judge
 tone or feel, which still needs a person with a guitar. Current build:
-**1.0.1-rc1** (release candidate 1).
+**1.0.5-rc1** (release candidate 1).
 
 Layout: `solotone.py` (app/GUI), `pedals.py` (pedal-effects DSP),
 `nam_engine.py` (Neural Amp Modeler inference), `version.py` (version +

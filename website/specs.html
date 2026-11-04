@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Specs — SoloTone</title>
+<meta name="description" content="SoloTone technical specifications: 44.1 kHz float32 audio engine, block sizes and latency, measured per-stage processing cost, WAV/NAM/IR formats and bit depths, DSP details and unique features.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@500;700;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-tally" viewBox="0 0 120 120">
+      <path d="M22 58 V44 Q22 20 60 20 Q98 20 98 44 V58" fill="none" stroke="#adadad" stroke-width="6" stroke-linecap="round"/>
+      <rect x="14" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <rect x="90" y="48" width="16" height="32" rx="8" fill="#202020" stroke="#adadad" stroke-width="3"/>
+      <circle cx="60" cy="66" r="30" fill="#202020" stroke="#adadad" stroke-width="3.5"/>
+      <path d="M40 62 Q46 54 52 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M68 62 Q74 54 80 62" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M46 78 Q60 90 74 78" fill="none" stroke="#1f7e89" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="98" cy="58" r="9" fill="#ff6b6b" opacity="0.2"/>
+      <circle cx="98" cy="58" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+    <symbol id="i-amp" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="34" fill="none" stroke="#adadad" stroke-width="4"/>
+      <circle cx="60" cy="60" r="21" fill="none" stroke="#adadad" stroke-width="3" opacity="0.7"/>
+      <circle cx="60" cy="60" r="8" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-pedal" viewBox="0 0 120 120">
+      <circle cx="58" cy="68" r="30" fill="none" stroke="#adadad" stroke-width="4"/>
+      <path d="M40 52 A30 30 0 0 1 76 44" fill="none" stroke="#c9c9c9" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+      <circle cx="90" cy="32" r="9" fill="#ff6b6b" opacity="0.18"/>
+      <circle cx="90" cy="32" r="4.5" fill="#ff6b6b"/>
+    </symbol>
+    <symbol id="i-loop" viewBox="0 0 120 120">
+      <path d="M62 26 A34 34 0 1 1 27 56" fill="none" stroke="#1f7e89" stroke-width="6" stroke-linecap="round"/>
+      <path d="M62 26 L50 22 M62 26 L55 37" stroke="#1f7e89" stroke-width="6" stroke-linecap="round" fill="none"/>
+    </symbol>
+    <symbol id="i-tuner" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="32" fill="none" stroke="#adadad" stroke-width="4"/>
+      <line x1="60" y1="60" x2="76" y2="31" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="60" cy="60" r="6.5" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-rec" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="32" fill="none" stroke="#adadad" stroke-width="4"/>
+      <circle cx="60" cy="60" r="14" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-metro" viewBox="0 0 120 120">
+      <path d="M40 100 L52 28 L68 28 L80 100 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <line x1="60" y1="92" x2="73" y2="40" stroke="#1f7e89" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="73" cy="40" r="5" fill="#1f7e89"/>
+    </symbol>
+    <symbol id="i-midi" viewBox="0 0 120 120">
+      <rect x="22" y="22" width="32" height="32" rx="6" fill="none" stroke="#adadad" stroke-width="4"/>
+      <rect x="66" y="22" width="32" height="32" rx="6" fill="none" stroke="#adadad" stroke-width="4"/>
+      <rect x="22" y="66" width="32" height="32" rx="6" fill="#1f7e89"/>
+      <rect x="66" y="66" width="32" height="32" rx="6" fill="none" stroke="#adadad" stroke-width="4"/>
+    </symbol>
+    <symbol id="i-save" viewBox="0 0 120 120">
+      <path d="M28 18 H78 L100 40 V102 H28 Z" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M78 18 V40 H100" fill="none" stroke="#adadad" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M43 66 L57 80 L88 50" fill="none" stroke="#1f7e89" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="site-header">
+  <a class="brand" href="index.html">
+    <svg class="brand-mark" viewBox="0 0 120 120"><use href="#i-tally"/></svg>
+    <span class="brand-word">SoloTone</span>
+  </a>
+  <nav class="site-nav">
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="specs.html" class="active">Specs</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+    <a class="nav-support" href="https://ko-fi.com/rexjaguarius" target="_blank" rel="noopener">&#9829; Support</a>
+  </nav>
+</header>
+
+<main class="container">
+
+  <section style="padding-bottom:0">
+    <span class="eyebrow">Specifications</span>
+    <h1 style="font-size:clamp(2.2rem,5.5vw,3.4rem); max-width:22ch; margin-top:10px;">
+      The numbers, as measured.
+    </h1>
+    <p style="color:var(--muted); font-size:1.05rem; max-width:64ch; margin-top:14px;">
+      Formats, rates, latency and processing cost for the 1.0 release candidates. Where a figure
+      was measured, the machine and method are stated; where it comes from the code, it says so.
+    </p>
+  </section>
+
+  <section style="padding-top:36px">
+    <div class="stat-strip">
+      <div class="stat"><b>44.1 kHz</b><span>internal sample rate</span></div>
+      <div class="stat"><b>32-bit float</b><span>stream &amp; recordings</span></div>
+      <div class="stat"><b>5.8 ms</b><span>per 256-sample block</span></div>
+      <div class="stat"><b>1.8 ms</b><span>standard NAM, per block*</span></div>
+      <div class="stat"><b>~56%</b><span>median callback load at 256*</span></div>
+      <div class="stat"><b>46</b><span>MIDI-mappable controls</span></div>
+    </div>
+    <p class="form-note" style="margin-top:14px">* Measured on an AMD Ryzen 7 5800X; see Processing time below.</p>
+  </section>
+
+  <!-- ===================== AUDIO ENGINE ===================== -->
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">Audio engine</span>
+      <h2>One duplex stream, one callback</h2>
+      <p>The tuner, metronome, looper and recorder tap the amp's stream instead of opening their own,
+        so nothing competes for the device.</p>
+    </div>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Sample rate</td><td>44,100 Hz, fixed. Devices configured at another rate are opened through WASAPI's automatic
+          rate/channel conversion; the DSP always runs at 44.1 kHz.</td></tr>
+        <tr><td>Stream format</td><td>float32, 1 input channel (the guitar) in, 2 channels out (the mono signal on both).</td></tr>
+        <tr><td>Internal precision</td><td>float32 signal path. NAM inference runs in float64 and is returned as float32; the EQ's
+          filter state and the cab-IR FFT are float64.</td></tr>
+        <tr><td>Block size</td><td>256, 512, 1024 or 2048 samples = 5.80 / 11.61 / 23.22 / 46.44 ms per block. 256 is the
+          smallest size that holds up with a NAM model and a cab IR loaded.</td></tr>
+        <tr><td>Host APIs</td><td>WASAPI (default), WDM-KS, DirectSound and MME on Windows; Core Audio on macOS; ALSA on Linux,
+          via PortAudio. No ASIO.</td></tr>
+        <tr><td>Latency, DSP</td><td>No look-ahead anywhere in the chain: NAM runs as a causal streaming model, cab convolution is
+          overlap-add (each block is returned as it arrives), and the dynamics have no look-ahead buffer. The 4&times;
+          oversampled clip stages add only the group delay of their anti-alias filters.</td></tr>
+        <tr><td>Latency, round trip</td><td>Input buffer + one processing block + output buffer + driver/converter latency. Plan on at
+          least two block lengths (11.6 ms at 256). The status line shows the figure the audio API reports once the stream is
+          running.</td></tr>
+        <tr><td>Process priority</td><td>Raised to HIGH on Windows while the amp is running.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ===================== PROCESSING TIME ===================== -->
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">Processing time</span>
+      <h2>What the chain costs per block</h2>
+      <p>The callback must finish each block in less time than the block lasts. These figures are the load a real chain puts on that budget.</p>
+    </div>
+
+    <h3 style="font-size:1.15rem; margin-bottom:12px">Full chains, by block size</h3>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Block</th><th class="num">Budget</th><th class="num">Mean load</th><th class="num">Range</th><th class="num">p99 block</th><th class="num">Worst block</th></tr></thead>
+      <tbody>
+        <tr><td>256 samples</td><td class="num">5.80 ms</td><td class="num">56%</td><td class="num">45&ndash;79%</td><td class="num">72%</td><td class="num">up to ~1.8&times;</td></tr>
+        <tr><td>512 samples</td><td class="num">11.61 ms</td><td class="num">47%</td><td class="num">36&ndash;63%</td><td class="num">58%</td><td class="num">up to ~1.1&times;</td></tr>
+        <tr><td>1024 samples</td><td class="num">23.22 ms</td><td class="num">41%</td><td class="num">30&ndash;53%</td><td class="num">47%</td><td class="num">~0.8&times;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="form-note" style="margin-top:12px; max-width:none">
+      Medians across 31 real Tone Profiles (standard WaveNet NAM models, cab IRs from none to 1 s, pedals as saved), each
+      processing 12 s of plucked-string audio block by block. &ldquo;Range&rdquo; is the lightest to heaviest profile; &ldquo;p99 block&rdquo;
+      is the 99th-percentile single block; &ldquo;Worst block&rdquo; is the slowest single block as a multiple of the budget. Offline harness:
+      no audio device, normal process priority, a desktop session running alongside.</p>
+    <div class="note-box">
+      <strong>Reading it:</strong> at 256 samples this CPU averages about half the budget, but isolated blocks can overrun, which is an
+      audible click. 512 samples is the comfortable setting; 1024 is for slower machines. Cost scales roughly inversely with
+      single-thread speed, so a CPU with half this one's would need 1024 or more (estimate, not measured).
+    </div>
+
+    <h3 style="font-size:1.15rem; margin:36px 0 12px">Per stage, 256-sample block</h3>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Stage</th><th class="num">Median</th><th class="num">p99</th><th>Share of 5.80 ms</th></tr></thead>
+      <tbody>
+        <tr><td>NAM WaveNet (standard, 6,332-sample receptive field)</td><td class="num">1.79 ms</td><td class="num">2.55 ms</td><td><span class="bar" style="--w:30.8%"><i></i></span></td></tr>
+        <tr><td>Cab IR, 1,356 taps (31 ms)</td><td class="num">0.04 ms</td><td class="num">0.07 ms</td><td><span class="bar" style="--w:0.6%"><i></i></span></td></tr>
+        <tr><td>Cab IR, 22,050 taps (0.5 s)</td><td class="num">0.27 ms</td><td class="num">0.45 ms</td><td><span class="bar" style="--w:4.6%"><i></i></span></td></tr>
+        <tr><td>Cab IR, 44,100 taps (1.0 s)</td><td class="num">0.84 ms</td><td class="num">1.26 ms</td><td><span class="bar" style="--w:14.4%"><i></i></span></td></tr>
+        <tr><td>5-band EQ</td><td class="num">0.03 ms</td><td class="num">0.05 ms</td><td><span class="bar" style="--w:0.5%"><i></i></span></td></tr>
+        <tr><td>Hum filter (3 notches)</td><td class="num">0.02 ms</td><td class="num">0.07 ms</td><td><span class="bar" style="--w:0.3%"><i></i></span></td></tr>
+        <tr><td>Compressor</td><td class="num">0.15 ms</td><td class="num">0.29 ms</td><td><span class="bar" style="--w:2.5%"><i></i></span></td></tr>
+        <tr><td>Wah</td><td class="num">0.19 ms</td><td class="num">0.38 ms</td><td><span class="bar" style="--w:3.2%"><i></i></span></td></tr>
+        <tr><td>Fuzz</td><td class="num">0.17 ms</td><td class="num">0.35 ms</td><td><span class="bar" style="--w:2.8%"><i></i></span></td></tr>
+        <tr><td>Distortion</td><td class="num">0.19 ms</td><td class="num">0.41 ms</td><td><span class="bar" style="--w:3.3%"><i></i></span></td></tr>
+        <tr><td>Overdrive / boost</td><td class="num">0.39 ms</td><td class="num">0.63 ms</td><td><span class="bar" style="--w:6.7%"><i></i></span></td></tr>
+        <tr><td>Chorus / flanger</td><td class="num">0.20 ms</td><td class="num">0.37 ms</td><td><span class="bar" style="--w:3.4%"><i></i></span></td></tr>
+        <tr><td>Delay</td><td class="num">0.27 ms</td><td class="num">0.42 ms</td><td><span class="bar" style="--w:4.6%"><i></i></span></td></tr>
+        <tr><td>Reverb</td><td class="num">0.65 ms</td><td class="num">1.12 ms</td><td><span class="bar" style="--w:11.2%"><i></i></span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="form-note" style="margin-top:12px; max-width:none">
+      Each stage timed alone on a 256-sample block, 600 runs after warm-up. The model is the largest single cost. A typical chain (a few pedals, EQ and a short IR) adds less than one more NAM block;
+      a 1 s IR with every pedal switched on would add more than the model does.</p>
+
+    <h3 style="font-size:1.15rem; margin:36px 0 12px">Off the audio thread</h3>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Operation</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td>Recording</td><td>The callback only copies each block into a bounded queue (4,000 blocks, about 23 s at 256); a writer thread does the disk
+          work. Dropped blocks are counted and reported, never silently lost.</td></tr>
+        <tr><td>Re-amp</td><td>About 1.4&times; real time through the heaviest chain tested (standard NAM, 1 s cab IR, pedals), on a worker thread with a cancel
+          button. Normal chains are faster.</td></tr>
+        <tr><td>Match level</td><td>A few seconds per sound: it renders a 6.3 s synthetic playing signal through the whole chain offline.</td></tr>
+        <tr><td>Tuner analysis</td><td>0.81 ms per reading (12,288-sample window), about 11 readings per second, on the interface thread.</td></tr>
+      </tbody>
+    </table></div>
+
+    <p class="form-note" style="margin-top:20px; max-width:none">
+      Test machine: AMD Ryzen 7 5800X (8 cores / 16 threads, 3.8 GHz base), 32 GB RAM, Windows 11, Python 3.10, NumPy 2.2.6, SciPy 1.15.3.
+      The NAM engine is pure NumPy; there is no compiled NAM core and no GPU use.</p>
+  </section>
+
+  <!-- ===================== FORMATS ===================== -->
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">Formats &amp; bit depths</span>
+      <h2>What goes in, what comes out</h2>
+    </div>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Item</th><th>Format</th></tr></thead>
+      <tbody>
+        <tr><td>Recording (wet &amp; dry)</td><td>WAV, mono, IEEE float 32-bit, 44.1 kHz. Sample-aligned pair; the header is rewritten every second, so a take cut short still opens.
+          Tapped after Output Gain, before Master Volume and the metronome click.</td></tr>
+        <tr><td>Re-amp input</td><td>WAV, 8/16/24/32-bit integer PCM or 32/64-bit float, any sample rate; multichannel files are averaged to mono.</td></tr>
+        <tr><td>Re-amp output</td><td>WAV, mono, 32-bit float, at the source's sample rate (polyphase resampling with SciPy), plus a 2 s tail for reverb and delay.</td></tr>
+        <tr><td>Looper export</td><td>WAV, mono, 16-bit PCM, 44.1 kHz &mdash; a single layer or the whole mix.</td></tr>
+        <tr><td>Cab IRs</td><td>WAV: 8/16/24/32-bit PCM, 32/64-bit float, including WAVE_FORMAT_EXTENSIBLE headers (parsed directly, not through Python's
+          <span style="font-family:var(--f-mono)">wave</span> module). Resampled to 44.1 kHz and L1-normalized on load. Five slots, A/B and blend.</td></tr>
+        <tr><td>Amp models</td><td>Neural Amp Modeler <span style="font-family:var(--f-mono)">.nam</span>, WaveNet architecture (A1 and A2 exports, SlimmableContainer files use the
+          highest-quality submodel). LSTM captures are not supported.</td></tr>
+        <tr><td>Tone Profiles</td><td><span style="font-family:var(--f-mono)">.stprofile</span>: JSON with a format-version field. Amp and IR paths, every pedal parameter and the chain order,
+          pedal MIDI mappings, EQ, gate, gains, hum filter, tuning, notes.</td></tr>
+        <tr><td>Pedal presets</td><td><span style="font-family:var(--f-mono)">.stpedal</span>: JSON, one pedal's parameters, portable between profiles.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ===================== DSP ===================== -->
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">DSP details</span>
+      <h2>How each block is built</h2>
+      <p>Signal order: hum filter, pre-amp pedals, input gain, noise gate, NAM, cab IR, EQ, post-amp pedals, Output Gain, Master Volume.</p>
+    </div>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Block</th><th>Implementation</th></tr></thead>
+      <tbody>
+        <tr><td>Noise gate</td><td>Block-RMS detector against a threshold; 3 ms attack and 60 ms release time constants, applied as a per-sample linear ramp across each block so block
+          edges don't click.</td></tr>
+        <tr><td>Hum filter</td><td>Cascaded IIR notches (Q = 25) at the mains frequency (50 or 60 Hz) and its next two harmonics.</td></tr>
+        <tr><td>Cab IR</td><td>Overlap-add FFT convolution, FFT length rounded up to the nearest 5-smooth size; the IR spectrum is cached per block size.</td></tr>
+        <tr><td>EQ</td><td>Five biquads: low shelf 100 Hz (Q 0.707), peaking 400 Hz, 1 kHz and 2.5 kHz (Q 1.0), high shelf 6 kHz (Q 0.707); &plusmn;15 dB each, plus a &plusmn;15 dB level trim.</td></tr>
+        <tr><td>Compressor</td><td>Soft-knee gain computer (6 dB knee), one-pole envelope follower, blendable tube-style saturation.</td></tr>
+        <tr><td>Fuzz &amp; distortion</td><td>Clip stages run 4&times; oversampled to suppress aliasing, with a DC blocker; Fuzz Face / Big Muff and DS-1 / RAT / Distortion+ / Metal voicings.</td></tr>
+        <tr><td>Wah</td><td>State-variable band-pass; manual position or auto-sweep.</td></tr>
+        <tr><td>Chorus / flanger, delay</td><td>LFO-modulated delay line; delay is tape (low-passed feedback) or digital, free-running or tempo-synced.</td></tr>
+        <tr><td>Reverb</td><td>Schroeder topology: four parallel comb filters into series all-passes.</td></tr>
+        <tr><td>Pedal chain</td><td>Eight effects around an AMP marker. Pre-amp pedals run ahead of the model; post-amp pedals run on the amp, cab and EQ output.</td></tr>
+        <tr><td>Looper</td><td>1&ndash;60 s loops, up to 10 layers, sample-count locked so layers cannot drift. Records the processed output; float32 buffers, 10.6 MB per layer at the longest length.</td></tr>
+        <tr><td>Metronome</td><td>Scheduled inside the audio callback, so clicks are sample-accurate regardless of CPU load; 30&ndash;250 BPM.</td></tr>
+        <tr><td>Tuner</td><td>McLeod normalized square-difference pitch detection with parabolic interpolation, on a 12,288-sample window (278 ms; 16,384 in Bass mode). Loudness-independent;
+          mains hum is subtracted by least squares before detection. Chromatic range about 40&ndash;1500 Hz (24&ndash;600 Hz in Bass mode); with a tuning selected the search narrows to that tuning's
+          strings. On synthetic plucked-string signals (six strings, &plusmn;25 cents, &minus;26 and &minus;50 dBFS) the mean error was 0.07 cent and the worst 0.5 cent.</td></tr>
+        <tr><td>MIDI &amp; keys</td><td>46 MIDI-mappable controls and 67 keyboard-mappable targets, learned by touching the control; Akai LPD8 mk2 pad LED feedback.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ===================== UNIQUE ===================== -->
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">What's different</span>
+      <h2>Unique features</h2>
+    </div>
+    <div class="trust-grid">
+      <div class="trust-card"><span class="eyebrow">NAM in pure NumPy</span>
+        <p>A from-scratch WaveNet inference engine with streaming state: no PyTorch, no compiled NAM core, no GPU. It installs with <span style="font-family:var(--f-mono)">pip</span> and runs the same on Windows, macOS and Linux.</p></div>
+      <div class="trust-card"><span class="eyebrow">Pre- and post-amp chain</span>
+        <p>An AMP marker splits the pedal order: drive and dynamics ahead of the model, time-based effects after it, so repeats and tails aren't compressed by a distorted amp.</p></div>
+      <div class="trust-card"><span class="eyebrow">Wet + dry recording</span>
+        <p>Two sample-aligned float WAVs per take, tapped before Master Volume and the click, written from a separate thread so the audio callback never touches the disk.</p></div>
+      <div class="trust-card"><span class="eyebrow">Offline re-amp</span>
+        <p>Run any WAV through the current sound at faster than real time. The offline chain is a GUI-free mirror of the live callback, so a render is what you would have heard.</p></div>
+      <div class="trust-card"><span class="eyebrow">Loudness matching</span>
+        <p>Match level measures a synthetic playing signal through the whole chain and sets Output Gain so every profile sits at &minus;18 dBFS RMS, closing gaps of 40 dB between amp captures.</p></div>
+      <div class="trust-card"><span class="eyebrow">Tuning-aware tuner</span>
+        <p>With a tuning selected, readings snap to that tuning's strings (octave-insensitive, with hysteresis); hum-subtracted detection finds quiet single-coil pickups.</p></div>
+      <div class="trust-card"><span class="eyebrow">One shared stream</span>
+        <p>The tuner, metronome, looper and recorder read from the amp's callback. There is no second stream to fight over the interface.</p></div>
+      <div class="trust-card"><span class="eyebrow">Whole-rig profiles</span>
+        <p>A profile is plain JSON: model, IRs, every pedal parameter and order, EQ, gains, tuning, MIDI mappings for the pedals, and your notes on pickup and knob settings.</p></div>
+      <div class="trust-card"><span class="eyebrow">Local, source-available</span>
+        <p>No network access, account or telemetry. Source-available under the PolyForm Shield License 1.0.0; it is not an OSI open-source license.</p></div>
+    </div>
+  </section>
+
+  <!-- ===================== REQUIREMENTS & LIMITS ===================== -->
+  <section>
+    <div class="section-head">
+      <span class="eyebrow">Requirements &amp; current limits</span>
+      <h2>What it needs, and what it doesn't do</h2>
+    </div>
+    <div class="table-wrap"><table class="spec-table">
+      <thead><tr><th>Item</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr><td>Platforms</td><td>Windows: standalone .exe, no Python needed. macOS and Linux: from source on Python 3.10 or later.</td></tr>
+        <tr><td>Dependencies</td><td>NumPy 1.24+, sounddevice 0.4.6+. Optional: SciPy 1.11+ (EQ filter stability, resampling), python-rtmidi (MIDI), Pillow (button corners, pedal icons).</td></tr>
+        <tr><td>Audio device</td><td>Any interface or microphone input the OS exposes; mono input. No ASIO driver is used or needed.</td></tr>
+        <tr><td>Fixed 44.1 kHz</td><td>NAM captures are run at the app's 44.1 kHz rate. They are not resampled to the rate they were trained at, which is usually 48 kHz.</td></tr>
+        <tr><td>Models</td><td>WaveNet NAM only; LSTM captures don't load.</td></tr>
+        <tr><td>Block size floor</td><td>256 samples. Smaller sizes don't keep up with a model and a cab IR in the Python callback.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="cta-band">
+      <div>
+        <h2>Run it and check the numbers.</h2>
+        <p>The status line shows your own stream's latency and xrun count.</p>
+      </div>
+      <a class="btn btn-primary" href="download.html">Get SoloTone</a>
+    </div>
+  </section>
+
+</main>
+
+
+<footer class="site-footer">
+  <span>SoloTone — runs entirely on your machine.</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="features.html">Features</a>
+    <a href="specs.html">Specs</a>
+    <a href="about.html">About</a>
+    <a href="download.html">Download</a>
+    <a href="contact.html">Contact</a>
+    <a href="https://ko-fi.com/rexjaguarius" target="_blank" rel="noopener">Support</a>
+  </nav>
+</footer>
+
+</body>
+</html>
