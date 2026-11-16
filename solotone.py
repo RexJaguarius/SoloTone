@@ -26,6 +26,7 @@ from pedals import PedalChain, DEFAULT_PEDAL_ORDER, AMP_MARKER, normalize_order
 import queue
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 
@@ -294,7 +295,37 @@ def _button_asset_image(size, radius, fill, outline, backdrop, outline_width=1):
     base.paste(shape, (0, 0), shape)
     return base
 
+def _folder_tab_image(size, fill, outline, backdrop, slope=7, radius=4, gap=1, scale=4):
+    """A file-folder tab: flat top with rounded shoulders, sides that slope
+    outward towards the bottom (like the tab on a manila folder), outlined
+    on the top and sides but NOT along the bottom, so a selected tab runs
+    straight into the panel below it. `gap` transparent-looking columns
+    are left on each side, which is what puts a small gap between
+    neighbouring tabs; the shape is composited onto an opaque `backdrop`
+    (the notebook's own background) for the same reason _button_asset_image
+    does it — ttk's image elements render a see-through edge badly."""
+    w, h = size
+    S = scale
+    left, right = gap, w - gap
+    pts = [(left, h + 2), (left + slope, radius)]
+    cx = left + slope + radius                       # left shoulder: quarter circle, 180 deg -> 270 deg
+    pts += [(cx + radius * math.cos(math.radians(a)), radius + radius * math.sin(math.radians(a)))
+            for a in range(180, 271, 15)]
+    cx = right - slope - radius                      # right shoulder: 270 deg -> 360 deg
+    pts += [(cx + radius * math.cos(math.radians(a)), radius + radius * math.sin(math.radians(a)))
+            for a in range(270, 361, 15)]
+    pts += [(right, h + 2)]
+    big = Image.new('RGB', (w * S, h * S), _hex_to_rgb(backdrop))
+    d = ImageDraw.Draw(big)
+    scaled = [(x * S, y * S) for x, y in pts]
+    d.polygon(scaled, fill=fill)
+    d.line(scaled, fill=outline, width=S, joint='curve')
+    return big.resize((w, h), Image.LANCZOS)
+
 MAX_IR_SLOTS = 5
+
+# The third-party firmware the optional Tank-G tab needs on the pedal (shown, with a link, at the top of that tab).
+ULTRARIG_URL = 'https://github.com/manuaguirre9/ultrarig'
 
 # ─────────────────────────────────────────────────────────────
 # Sound synthesis helpers
@@ -812,6 +843,75 @@ def gate_step(att, is_open, frames, sr=SAMPLE_RATE):
     new = att + (1.0 - math.exp(-frames / (sr * tau))) * ((1.0 if is_open else 0.0) - att)
     return new, np.linspace(att, new, frames, dtype=np.float32)
 
+
+# Smart gate defaults (the "Smart" mode of the Noise Gate; see SmartGate)
+SMART_GATE_RANGE_DB   = 60.0    # how far it pulls the signal down when closed
+SMART_GATE_RELEASE_MS = 120.0
+SMART_GATE_HOLD_MS    = 30.0
+SMART_GATE_HUSH       = 0.5     # 0 = a plain gate, 1 = a long, gentle fade into the noise floor
+
+
+class SmartGate:
+    """The "Smart" noise gate. It differs from the standard one in four ways:
+    it opens at the threshold but only closes once the level has fallen 6 dB
+    below it (so a note decaying through the threshold does not flutter),
+    it holds open for a short time after the level drops, it can close to a
+    chosen depth instead of always to silence, and below the threshold the
+    'hush' control fades the sound down along its own level as a gentle
+    downward expander rather than chopping it. Level is read from a short
+    smoothed power average in 64-sample steps, so the timing does not depend
+    on the audio block size. State is carried between blocks."""
+    STEP = 64
+
+    def __init__(self, sr=SAMPLE_RATE):
+        self.sr = sr
+        self.open = False
+        self.hold = 0.0         # seconds of hold left
+        self.gain = 0.0         # current smoothed gain
+        self.power = 0.0        # smoothed signal power
+
+    def process(self, x, thr, range_db=SMART_GATE_RANGE_DB, release_ms=SMART_GATE_RELEASE_MS,
+                hold_ms=SMART_GATE_HOLD_MS, hush=SMART_GATE_HUSH):
+        n = len(x)
+        if n == 0:
+            return x
+        sr, step = self.sr, self.STEP
+        floor = 10.0 ** (-max(0.0, range_db) / 20.0)
+        hush = max(0.0, min(1.0, hush))
+        a_pow = 1.0 - math.exp(-step / (sr * 0.008))                       # 8 ms level averaging
+        a_up = 1.0 - math.exp(-step / (sr * 0.002))                        # 2 ms to open
+        a_dn = 1.0 - math.exp(-step / (sr * max(0.005, release_ms / 1000.0)))
+        thr_lo = thr * 0.5                                                 # closes 6 dB below where it opens
+        xf = np.asarray(x, dtype=np.float32)
+        gains = np.empty(n, dtype=np.float32)
+        g = self.gain
+        for lo in range(0, n, step):
+            seg = xf[lo:lo + step]
+            m = len(seg)
+            self.power += a_pow * (float(np.mean(seg * seg)) - self.power)
+            lvl = math.sqrt(max(self.power, 0.0))
+            if lvl >= thr:
+                self.open = True
+                self.hold = hold_ms / 1000.0
+            elif lvl < thr_lo and self.open:
+                self.hold -= m / sr
+                if self.hold <= 0.0:
+                    self.open = False
+            if self.open:
+                target = 1.0
+            elif hush > 0.0 and thr_lo > 0:
+                # closed, but the sound is still falling through the quiet part: instead of dropping straight
+                # to the floor, follow the level down (gain = (level / close point) ** (1 + 3 * hush)), so a
+                # dying note fades into the noise rather than being chopped off
+                target = max(floor, hush * min(1.0, lvl / thr_lo) ** (1.0 + 3.0 * hush))
+            else:
+                target = floor
+            g_new = g + (a_up if target > g else a_dn) * (target - g)
+            gains[lo:lo + m] = np.linspace(g, g_new, m, dtype=np.float32)
+            g = g_new
+        self.gain = g
+        return xf * gains
+
 # ─────────────────────────────────────────────────────────────
 # Level matching — measure a profile's loudness offline
 # ─────────────────────────────────────────────────────────────
@@ -894,6 +994,13 @@ class OfflineChain:
         self.gate_thr = max(1e-9, float(data.get('gate_threshold', 0.01)))
         self.sr = sr
         self._gate_att = 0.0
+        # profiles saved before the Smart mode existed have none of these: standard gate
+        self.gate_mode    = 'smart' if data.get('gate_mode') == 'smart' else 'standard'
+        self.gate_range   = float(data.get('gate_range', SMART_GATE_RANGE_DB))
+        self.gate_release = float(data.get('gate_release', SMART_GATE_RELEASE_MS))
+        self.gate_hold    = float(data.get('gate_hold', SMART_GATE_HOLD_MS))
+        self.gate_hush    = float(data.get('gate_hush', SMART_GATE_HUSH))
+        self._smart_gate  = SmartGate(sr)
 
     def process(self, raw, bpm=120):
         """One block of mono float32 in, one block out (same length)."""
@@ -901,9 +1008,13 @@ class OfflineChain:
         x = self.hum.process(np.ascontiguousarray(raw, dtype=np.float32))
         x = self.pedals.process(x, metro_bpm=bpm)
         x = x * self.in_gain
-        self._gate_att, ramp = gate_step(self._gate_att,
-                                         float(np.sqrt(np.mean(x ** 2))) >= self.gate_thr, n, self.sr)
-        x = x * ramp
+        if self.gate_mode == 'smart':
+            x = self._smart_gate.process(x, self.gate_thr, self.gate_range, self.gate_release,
+                                         self.gate_hold, self.gate_hush)
+        else:
+            self._gate_att, ramp = gate_step(self._gate_att,
+                                             float(np.sqrt(np.mean(x ** 2))) >= self.gate_thr, n, self.sr)
+            x = x * ramp
         if self.nam is not None:
             x = self.nam.process(x)
             p = float(np.max(np.abs(x))) if x.size else 0.0
@@ -1094,6 +1205,35 @@ def read_audio_mono(path):
     if nch > 1:
         arr = arr[:len(arr) // nch * nch].reshape(-1, nch).mean(axis=1)
     return arr.astype(np.float32), int(sr)
+
+def _load_tankg_api(search_dirs=None):
+    """The optional Tank-G tab. Looks for a `tankg-bridge` folder next to the
+    app (or next to the .exe) and loads its tankg_api.py. That folder holds the
+    code that talks to a Tank-G pedal running the UltraRig firmware; it is a
+    separate, personal-use add-on (its licence differs from SoloTone's), so
+    SoloTone neither ships nor requires it. Returns the module, or None."""
+    import importlib.util
+    if search_dirs is None:
+        search_dirs = [pathlib.Path(__file__).resolve().parent / 'tankg-bridge']
+        if getattr(sys, 'frozen', False):
+            search_dirs.insert(0, pathlib.Path(sys.executable).resolve().parent / 'tankg-bridge')
+    for d in search_dirs:
+        f = pathlib.Path(d) / 'tankg_api.py'
+        if not f.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location('tankg_api', f)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        except Exception:
+            return None
+    return None
+
+def ir_to_48k_mono(path):
+    """Cab IR as mono float32 at 48 kHz (what the Tank-G wants)."""
+    data, sr = read_audio_mono(path)
+    return _resample(data, sr, 48000)
 
 REAMP_TAIL_SECONDS = 2.0       # silence appended so reverb/delay tails finish
 REAMP_NORMALIZE_PEAK_DB = -12.0
@@ -1627,12 +1767,14 @@ def _midi_trigger_action(fn):
 # Reverb, Tuner Mute) simply aren't in here — long-press on those pads
 # just does nothing extra.
 PEDAL_MODE_CYCLE = {
-    'pedal_wah_on':    ('wah_mode',    ['manual', 'auto']),
-    'pedal_fuzz_on':   ('fuzz_mode',   ['fuzz_face', 'big_muff']),
+    'pedal_wah_on':    ('wah_mode',    ['manual', 'auto', 'envelope']),
+    'pedal_rotary_on': ('rotary_speed', ['slow', 'fast', 'brake']),
+    'pedal_fuzz_on':   ('fuzz_mode',   ['fuzz_face', 'tone_bender', 'big_muff']),
     'pedal_dist_on':   ('dist_mode',   ['ds1', 'rat', 'dist_plus', 'metal']),
-    'pedal_od_on':     ('od_mode',     ['tubescreamer', 'klon', 'boost']),
-    'pedal_chorus_on': ('chorus_mode', ['chorus', 'flanger']),
+    'pedal_od_on':     ('od_mode',     ['tubescreamer', 'klon', 'bd2', 'boost']),
+    'pedal_chorus_on': ('chorus_mode', ['chorus', 'flanger', 'vibrato', 'doubler']),
     'pedal_delay_on':  ('delay_mode',  ['tape', 'digital']),
+    'pedal_reverb_on': ('reverb_type', ['room', 'plate', 'spring', 'cloud']),
 }
 
 # Each entry: id (stored in the mapping file), label (Settings-tab UI),
@@ -1682,12 +1824,33 @@ MIDI_MAPPABLE_TARGETS = [
     dict(id='od_drive',      label='Overdrive Drive', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('od_drive', 1.0, 10.0)),
 
-    dict(id='pedal_chorus_on', label='Chorus/Flanger Enabled', category='Pedals', kind='toggle',
+    dict(id='pedal_phaser_on', label='Phaser Enabled', category='Pedals', kind='toggle',
+         action=_midi_toggle_action('phaser_var', lambda app, v: setattr(app.amp.pedals, 'phaser_on', v))),
+    dict(id='phaser_rate',   label='Phaser Rate', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('phaser_rate', 0.05, 5.0)),
+    dict(id='phaser_depth',  label='Phaser Depth', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('phaser_depth', 0.0, 1.0)),
+
+    dict(id='pedal_chorus_on', label='Chorus/Flanger/Vibrato/Doubler Enabled', category='Pedals', kind='toggle',
          action=_midi_toggle_action('ch_var', lambda app, v: setattr(app.amp.pedals, 'chorus_on', v))),
     dict(id='chorus_rate',   label='Chorus Rate', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('chorus_rate', 0.1, 5.0)),
     dict(id='chorus_mix',    label='Chorus Mix', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('chorus_mix', 0.0, 1.0)),
+
+    dict(id='pedal_tremolo_on', label='Tremolo Enabled', category='Pedals', kind='toggle',
+         action=_midi_toggle_action('trem_var', lambda app, v: setattr(app.amp.pedals, 'tremolo_on', v))),
+    dict(id='tremolo_rate',  label='Tremolo Rate', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('tremolo_rate', 0.5, 15.0)),
+    dict(id='tremolo_depth', label='Tremolo Depth', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('tremolo_depth', 0.0, 1.0)),
+
+    dict(id='pedal_rotary_on', label='Rotary Enabled', category='Pedals', kind='toggle',
+         action=_midi_toggle_action('rot_var', lambda app, v: setattr(app.amp.pedals, 'rotary_on', v))),
+    dict(id='rotary_depth',  label='Rotary Depth', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('rotary_depth', 0.0, 1.0)),
+    dict(id='rotary_speed',  label='Rotary Speed (Slow / Fast)', category='Pedals', kind='trigger',
+         action=_midi_trigger_action(lambda app: app._rotary_toggle_speed())),
 
     dict(id='pedal_delay_on',  label='Delay Enabled', category='Pedals', kind='toggle',
          action=_midi_toggle_action('dly_var', lambda app, v: setattr(app.amp.pedals, 'delay_on', v))),
@@ -1702,6 +1865,8 @@ MIDI_MAPPABLE_TARGETS = [
          action=_midi_pedal_cc_action('reverb_size', 0.1, 1.0)),
     dict(id='reverb_mix',    label='Reverb Mix', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('reverb_mix', 0.0, 1.0)),
+    dict(id='reverb_decay',  label='Reverb Decay', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('reverb_decay', 0.0, 1.0)),
 
     # Tuner Mute is a global kill switch ahead of the reorderable chain,
     # not part of it (same distinction PedalChain itself makes) — listed
@@ -1991,11 +2156,14 @@ PEDAL_SECTION_TITLES = {
     'fuzz':   'Fuzz',
     'dist':   'Distortion',
     'od':     'Overdrive / Boost',
-    'chorus': 'Chorus / Flanger',
+    'phaser': 'Phaser',
+    'chorus': 'Chorus / Flanger / Vibrato / Doubler',
+    'tremolo': 'Tremolo',
+    'rotary': 'Rotary Speaker',
     'delay':  'Delay',
     'reverb': 'Reverb',
 }
-# The Pedals tab's 8 effect sections behave as an accordion (see _sec()'s
+# The Pedals tab's effect sections behave as an accordion (see _sec()'s
 # `group` param) — opening one collapses whichever of the others was
 # open, so at most one is ever expanded at a time. Compressor starts
 # open, the rest start closed.
@@ -2021,10 +2189,55 @@ PEDAL_ICON_SPECS = {
     'fuzz':   ('FUZZ', '#c1611f'),
     'dist':   ('DIST', '#a83c3c'),
     'od':     ('OD',   '#c99a2e'),
+    'phaser': ('PHAS', '#b0507a'),
     'chorus': ('CHOR', '#3d84a8'),
+    'tremolo': ('TREM', '#4f7f9a'),
+    'rotary': ('ROT',  '#9a6a3d'),
     'delay':  ('DLY',  '#3d8a5c'),
     'reverb': ('REV',  '#6a5a9c'),
 }
+# What the Pedal Board shows under each pedal's name: the pedal's group, and
+# the one setting that tells you what it is currently set to be (its type,
+# or its main knob for pedals with no type). PEDAL_BOARD_SUMMARY returns the
+# short text from the live PedalChain.
+PEDAL_BOARD_NAMES = {
+    'comp': 'Compressor', 'wah': 'Wah', 'fuzz': 'Fuzz', 'dist': 'Distortion', 'od': 'Overdrive',
+    'phaser': 'Phaser', 'chorus': 'Chorus', 'tremolo': 'Tremolo', 'rotary': 'Rotary', 'delay': 'Delay', 'reverb': 'Reverb',
+}
+PEDAL_GROUPS = [
+    ('Dynamics & filter', ('comp', 'wah')),
+    ('Drive',             ('fuzz', 'dist', 'od')),
+    ('Modulation',        ('phaser', 'chorus', 'tremolo', 'rotary')),
+    ('Time',              ('delay', 'reverb')),
+]
+_PEDAL_TYPE_NAMES = {
+    'wah_mode': {'manual': 'Manual', 'auto': 'Auto', 'envelope': 'Envelope'},
+    'fuzz_mode': {'fuzz_face': 'Fuzz Face', 'tone_bender': 'Tone Bender', 'big_muff': 'Big Muff'},
+    'dist_mode': {'ds1': 'DS-1', 'rat': 'RAT', 'dist_plus': 'Dist+', 'metal': 'Metal'},
+    'od_mode': {'tubescreamer': 'Tubescreamer', 'klon': 'Klon', 'bd2': 'Blues Driver', 'boost': 'Boost'},
+    'chorus_mode': {'chorus': 'Chorus', 'flanger': 'Flanger', 'vibrato': 'Vibrato', 'doubler': 'Doubler'},
+    'delay_mode': {'tape': 'Tape', 'digital': 'Digital'},
+    'rotary_speed': {'slow': 'Slow', 'fast': 'Fast', 'brake': 'Brake'},
+    'reverb_type': {'room': 'Room', 'plate': 'Plate', 'spring': 'Spring', 'cloud': 'Cloud'},
+}
+
+def PEDAL_BOARD_SUMMARY(code, p):
+    """Short text for a pedal's Board tile: its current type, or its main setting."""
+    def t(attr):
+        return _PEDAL_TYPE_NAMES[attr].get(getattr(p, attr), str(getattr(p, attr)))
+    if code == 'comp':    return f'{p.comp_ratio:.0f}:1'
+    if code == 'wah':     return t('wah_mode')
+    if code == 'fuzz':    return t('fuzz_mode')
+    if code == 'dist':    return t('dist_mode')
+    if code == 'od':      return t('od_mode')
+    if code == 'phaser':  return f'{p.phaser_rate:.1f} Hz'
+    if code == 'chorus':  return t('chorus_mode')
+    if code == 'tremolo': return f'{p.tremolo_rate:.1f} Hz'
+    if code == 'rotary':  return t('rotary_speed')
+    if code == 'delay':   return f'{t("delay_mode")} {p._delay_time_secs() * 1000:.0f} ms'
+    if code == 'reverb':  return t('reverb_type')
+    return ''
+
 PEDAL_ICON_SIZE = (56, 72)   # px
 _PEDAL_ICON_PHOTO_CACHE = {}   # code -> ImageTk.PhotoImage, built once and reused
 
@@ -2052,14 +2265,73 @@ def _build_pedal_icon_image(label, fill, size=PEDAL_ICON_SIZE):
     d.text(((w - tw) / 2 - tb[0], h - th - 12 - tb[1]), label, fill='#f2f2f2', font=font)
     return img
 
-def _get_pedal_icon_photo(code):
-    photo = _PEDAL_ICON_PHOTO_CACHE.get(code)
+def _dim_icon_image(img):
+    """The icon for a switched-off pedal: washed out and darker, corners still transparent."""
+    r, g, b, a = img.convert('RGBA').split()
+    rgb = Image.merge('RGB', (r, g, b))
+    rgb = Image.blend(rgb, rgb.convert('L').convert('RGB'), 0.7).point(lambda v: int(v * 0.6))
+    return Image.merge('RGBA', (*rgb.split(), a))
+
+def _get_pedal_icon_photo(code, dim=False):
+    key = (code, dim)
+    photo = _PEDAL_ICON_PHOTO_CACHE.get(key)
     if photo is None and HAS_PIL:
         label, fill = PEDAL_ICON_SPECS[code]
-        photo = ImageTk.PhotoImage(_build_pedal_icon_image(label, fill))
-        _PEDAL_ICON_PHOTO_CACHE[code] = photo
+        img = _build_pedal_icon_image(label, fill)
+        photo = ImageTk.PhotoImage(_dim_icon_image(img) if dim else img)
+        _PEDAL_ICON_PHOTO_CACHE[key] = photo
         _UI_IMAGE_REFS.append(photo)
     return photo
+
+
+class _FlowFrame(tk.Frame):
+    """Children flow left to right and wrap to the width, like words in a paragraph (a pedal's control cards)."""
+    def __init__(self, parent, bg, gap=6):
+        super().__init__(parent, bg=bg)
+        self._items, self._hidden, self._gap, self._key = [], set(), gap, None
+        self.bind('<Configure>', lambda e: self.reflow())
+
+    def add(self, w):
+        self._items.append(w)
+        self._key = None
+        self.after_idle(self.reflow)
+        return w
+
+    def set_visible(self, w, visible):
+        (self._hidden.discard if visible else self._hidden.add)(w)
+        self._key = None
+        self.reflow()
+
+    _MAX_CARD_W = 460
+
+    def reflow(self):
+        """Lay the cards out in as many equal columns as fit, then let each card take its column's full width (up to
+        a cap), so the controls use the panel's width instead of sitting in a fixed-size clump."""
+        try:
+            width = max(1, self.winfo_width() - 4)
+            items = [w for w in self._items if w not in self._hidden and w.winfo_exists()]
+            for w in self._items:
+                if w in self._hidden:
+                    w.grid_forget()
+            if not items:
+                return
+            need = max(w.winfo_reqwidth() for w in items)
+            cols = max(1, min(len(items), (width + self._gap) // (need + self._gap)))
+            card_w = int(min(self._MAX_CARD_W, max(need, (width - self._gap * (cols - 1)) // cols)))
+            key = (cols, card_w, tuple(id(w) for w in items))
+            if key == self._key:
+                return
+            self._key = key
+            for w in items:
+                w.grid_forget()
+            for c in range(self.grid_size()[0] + 1):
+                self.columnconfigure(c, minsize=0, weight=0)
+            for c in range(cols):
+                self.columnconfigure(c, minsize=card_w, weight=0)
+            for i, w in enumerate(items):
+                w.grid(row=i // cols, column=i % cols, padx=(0, self._gap), pady=(0, self._gap), sticky='new')
+        except tk.TclError:
+            pass
 
 
 # PedalChain itself now lives in pedals.py (imported near the top of
@@ -2131,6 +2403,12 @@ class AmpProcessor:
         self.gate_thr   = 0.01      # noise gate threshold (linear)
         self.gate_open  = False
         self.gate_att   = 0.0
+        self.gate_mode    = 'standard'   # 'standard' | 'smart' (see SmartGate)
+        self.gate_range   = SMART_GATE_RANGE_DB
+        self.gate_release = SMART_GATE_RELEASE_MS
+        self.gate_hold    = SMART_GATE_HOLD_MS
+        self.gate_hush    = SMART_GATE_HUSH
+        self._smart_gate  = SmartGate(SAMPLE_RATE)
         self.nam        = None      # StreamingNAM | None
         self.nam_on     = False
         self.ir_slots   = [IRConv() for _ in range(MAX_IR_SLOTS)]
@@ -2180,9 +2458,13 @@ class AmpProcessor:
         x = self.pedals.process(raw, metro_bpm=bpm)
         with self.lock:
             x = x * self.in_gain
-            rms = float(np.sqrt(np.mean(x**2)))
-            self.gate_att, ramp = gate_step(self.gate_att, rms >= self.gate_thr, frames)
-            x = x * ramp
+            if self.gate_mode == 'smart':
+                x = self._smart_gate.process(x, self.gate_thr, self.gate_range, self.gate_release,
+                                             self.gate_hold, self.gate_hush)
+            else:
+                rms = float(np.sqrt(np.mean(x**2)))
+                self.gate_att, ramp = gate_step(self.gate_att, rms >= self.gate_thr, frames)
+                x = x * ramp
             if self.nam_on and self.nam is not None:
                 try:
                     x = self.nam.process(x)
@@ -2647,14 +2929,23 @@ PEDAL_PROFILE_FIELDS = [
     'comp_makeup', 'comp_warmth',
     'wah_on', 'wah_mode', 'wah_range_lo', 'wah_range_hi', 'wah_pos', 'wah_q',
     'wah_auto_rate', 'wah_auto_depth',
+    'wah_env_sens', 'wah_env_decay', 'wah_env_type', 'wah_env_dir',
     'fuzz_on', 'fuzz_mode', 'fuzz_drive', 'fuzz_vol', 'muff_tone',
     'dist_on', 'dist_mode', 'dist_drive', 'dist_tone', 'dist_vol',
     'od_on', 'od_mode', 'od_drive', 'od_vol',
+    'phaser_on', 'phaser_rate', 'phaser_depth', 'phaser_feedback',
     'chorus_on', 'chorus_mode', 'chorus_rate', 'chorus_depth', 'chorus_mix',
+    'tremolo_on', 'tremolo_rate', 'tremolo_depth', 'tremolo_shape',
+    'rotary_on', 'rotary_speed', 'rotary_slow', 'rotary_fast', 'rotary_depth', 'rotary_ramp', 'rotary_mix',
     'delay_on', 'delay_mode', 'delay_bpm_link', 'delay_note', 'delay_time',
     'delay_feedback', 'delay_mix',
-    'reverb_on', 'reverb_mix', 'reverb_size',
+    'reverb_on', 'reverb_type', 'reverb_mix', 'reverb_size', 'reverb_decay', 'reverb_damp',
 ]
+
+# Each pedal setting's factory value, read from a fresh PedalChain — what a
+# setting returns to when a loaded profile doesn't mention it (see _apply_profile).
+PEDAL_FACTORY_VALUES = {f: getattr(PedalChain(SAMPLE_RATE), f)
+                        for f in PEDAL_PROFILE_FIELDS if f != 'order'}
 
 # Per-pedal mini-presets — a Tone Profile captures the whole chain at
 # once; these capture just ONE pedal's own settings, reusable across
@@ -2667,7 +2958,8 @@ PEDAL_PRESET_FIELDS = {
     code: [f for f in PEDAL_PROFILE_FIELDS if f.startswith(prefix)]
     for code, prefix in {
         'comp': 'comp_', 'wah': 'wah_', 'fuzz': 'fuzz_', 'dist': 'dist_',
-        'od': 'od_', 'chorus': 'chorus_', 'delay': 'delay_', 'reverb': 'reverb_',
+        'od': 'od_', 'phaser': 'phaser_', 'chorus': 'chorus_', 'tremolo': 'tremolo_', 'rotary': 'rotary_',
+        'delay': 'delay_', 'reverb': 'reverb_',
     }.items()
 }
 PEDAL_PRESET_FIELDS['fuzz'].append('muff_tone')  # Big Muff tone control — doesn't share the fuzz_ prefix
@@ -2838,8 +3130,8 @@ class App(tk.Tk):
         self.title(f'SoloTone  v{VERSION_FULL}')
         _set_app_icon(self)
         self.configure(bg=BG)
-        self.geometry('820x720')
-        self.minsize(740, 600)
+        self.geometry('900x720')
+        self.minsize(800, 600)
 
         self.beat_q  = queue.Queue(maxsize=16)
         self.metro   = Metronome(self.beat_q)
@@ -2867,6 +3159,7 @@ class App(tk.Tk):
         # factory colors first. _load_session() only re-checks the rest
         # of the file later, after the UI already exists.
         self._section_collapsed = {}
+        self._insp_open, self._insp_sel, self._insp_h, self._insp_max = [], None, 260, False
         # title -> outer section frame, and group name -> [titles] — built
         # fresh by every _sec() call as tabs are (re)built, never cleared
         # elsewhere, so a single-tab rebuild (_rebuild_pedals_ui) leaves
@@ -2878,6 +3171,10 @@ class App(tk.Tk):
             with open(SESSION_FILE) as f:
                 _early_session = json.load(f)
             self._section_collapsed = _early_session.get('section_collapsed', {})
+            _pp = _early_session.get('pedal_panel') or {}
+            self._insp_open = [c for c in _pp.get('open', []) if c in PEDAL_SECTION_TITLES]
+            self._insp_sel = _pp.get('sel') if _pp.get('sel') in self._insp_open else (self._insp_open[-1] if self._insp_open else None)
+            self._insp_h = max(150, int(_pp.get('h', 260)))
             accent = _early_session.get('theme_accent')
             bg     = _early_session.get('theme_bg')
             if _valid_hex_color(accent) or _valid_hex_color(bg):
@@ -3013,7 +3310,7 @@ class App(tk.Tk):
         ]:
             s.configure(name, background=bg_, foreground=fg_, font=font_)
         s.configure('TNotebook.Tab', background=PANEL, foreground=FG,
-                    padding=(16,9), font=(FF,11,'bold'))
+                    padding=(9,8), font=(FF,10,'bold'))
         s.map('TNotebook.Tab',
               background=[('selected', ACCENT)],
               foreground=[('selected', ACCENT_DARK)])
@@ -3039,6 +3336,67 @@ class App(tk.Tk):
                   indicatorbackground=[('selected', ACCENT), ('!selected', BG_WELL)])
 
         self._setup_rounded_buttons(s)
+        self._setup_folder_tabs(s)
+
+    # The notebook's tabs, drawn as the tabs of a file folder.
+    _TAB_IMG_SIZE = (60, 28)    # source image (px); ttk stretches its flat middle to each tab's width
+    _TAB_SLOPE    = 7           # how far the sides lean out towards the bottom
+    _TAB_RADIUS   = 4           # the rounded top shoulders
+    _TAB_GAP      = 1           # blank px each side of a tab: 2 px between neighbours
+    _TAB_PAD      = (11, 5, 11, 3)   # text padding (left, top, right, bottom), the SAME in every state (see below).
+                                     # Top is 1 px more than bottom because the label's own line box leaves extra room
+                                     # under the baseline: measured, this makes the gap above the capitals equal the gap below.
+    _folder_tab_generation = 0
+
+    def _setup_folder_tabs(self, style):
+        """Make the notebook tabs look like the tabs of a file folder: flat
+        tops with rounded shoulders, sides that slope out at the bottom,
+        and a 2 px gap between neighbours. The selected tab keeps the
+        accent colour with dark text and runs into an accent-coloured edge
+        around the panel, like the front folder in a drawer. Unselected
+        tabs sit behind it in the panel colour and lighten on hover.
+
+        The 'clam' theme gives a SELECTED tab less padding than the rest
+        (4 px top instead of 8), which is what made the selected tab look
+        smaller than its neighbours: every state is pinned to the same
+        padding here so they are all the same size. That part works
+        without Pillow; the folder shapes need it (drawn as small 9-slice
+        images, the same way the rounded buttons are), and without it the
+        tabs keep clam's plain rectangles."""
+        pad = self._TAB_PAD
+        style.configure('TNotebook', tabmargins=(2, 2, 2, 0), background=BG)   # 2 px above the tabs, none below
+        style.configure('TNotebook.Tab', padding=pad, font=(FF, 10, 'bold'))
+        style.map('TNotebook.Tab',
+                  padding=[('selected', pad), ('!selected', pad)],
+                  expand=[('selected', (0, 0, 0, 0)), ('!selected', (0, 0, 0, 0))],
+                  background=[('selected', ACCENT), ('active', _lighten_color(PANEL, 14))],
+                  foreground=[('selected', ACCENT_DARK)])
+        if not HAS_PIL:
+            return
+        App._folder_tab_generation += 1
+        gen = App._folder_tab_generation
+        edge = _scale_color(FG, 0.5)
+
+        def img(fill, outline):
+            photo = ImageTk.PhotoImage(_folder_tab_image(
+                self._TAB_IMG_SIZE, fill, outline, BG,
+                self._TAB_SLOPE, self._TAB_RADIUS, self._TAB_GAP))
+            _UI_IMAGE_REFS.append(photo)
+            return photo
+        normal, hover = img(PANEL, edge), img(_lighten_color(PANEL, 14), edge)
+        selected = img(ACCENT, _scale_color(ACCENT, 0.6))
+        lr = self._TAB_GAP + self._TAB_SLOPE + self._TAB_RADIUS + 1     # the left/right 9-slice border
+        style.element_create(f'FolderTab{gen}.tab', 'image', normal,
+                             ('selected', selected), ('active', hover),
+                             border=(lr, self._TAB_RADIUS + 2, lr, 0), padding=(0, 0, 0, 0),
+                             sticky='nsew')   # padding 0: by default ttk would ADD the border width to the text padding
+        # no 'Notebook.focus' element: that is the dashed rectangle clam draws inside the focused tab
+        style.layout('TNotebook.Tab', [
+            (f'FolderTab{gen}.tab', {'sticky': 'nswe', 'children': [
+                ('Notebook.padding', {'side': 'top', 'sticky': 'nswe', 'children': [
+                    ('Notebook.label', {'side': 'top', 'sticky': ''})]})]})])
+        # the panel's own edge, in the accent colour, so the selected tab joins it
+        style.configure('TNotebook', bordercolor=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT)
 
     # A ttk 9-slice image element's `border` sets a hard MINIMUM button
     # size along each axis (measured: height = 31 + 2*border, regardless
@@ -3154,7 +3512,7 @@ class App(tk.Tk):
         # ── notebook ─────────────────────────────────────────
         nb = ttk.Notebook(self)
         self._notebook = nb   # kept so _full_rebuild_ui() can restore the selected tab
-        nb.pack(fill='both', expand=True, padx=8, pady=(8,0))
+        nb.pack(fill='both', expand=True, padx=8, pady=(3,0))
 
         t_io    = ttk.Frame(nb)
         t_chain = ttk.Frame(nb)
@@ -3164,12 +3522,18 @@ class App(tk.Tk):
 
         t_pedals   = ttk.Frame(nb)
         t_settings = ttk.Frame(nb)
+        # Optional Tank-G tab: only exists when the tankg-bridge add-on folder is present.
+        if getattr(self, '_tankg', None) is None:
+            self._tankg = _load_tankg_api()
+        t_tank = ttk.Frame(nb) if self._tankg is not None else None
         nb.add(t_io,       text='  I/O & Levels  ')
         nb.add(t_chain,    text='  Signal Chain  ')
         nb.add(t_pedals,   text='  Pedals  ')
         nb.add(t_loop,     text='  Looper  ')
         nb.add(t_rec,      text='  Record  ')
         nb.add(t_metro,    text='  Metronome  ')
+        if t_tank is not None:
+            nb.add(t_tank, text='  Tank-G  ')
         nb.add(t_settings, text='  Settings  ')
 
         self._pedals_tab_root = t_pedals  # kept to allow rebuilding after a profile load
@@ -3179,6 +3543,8 @@ class App(tk.Tk):
         self._tab_looper(t_loop)
         self._tab_record(t_rec)
         self._tab_metro(t_metro)
+        if t_tank is not None:
+            self._tab_tankg(t_tank)
         self._tab_settings(t_settings)
 
         # Global keybind dispatch — single <KeyPress>/<KeyRelease> binds
@@ -3474,6 +3840,9 @@ class App(tk.Tk):
             if now: inner.pack_forget()
             else:   inner.pack(fill='x', pady=(0,2))
             hdr.configure(text=self._sec_hdr_text(title, now))
+            hook = getattr(self, '_on_section_toggled', None)
+            if hook is not None:
+                hook()          # the Pedalboard outlines the tile of whichever pedal is open
             if group is not None and not now:
                 # Just expanded, and part of an accordion group — collapse
                 # every other member so only this one stays open.
@@ -3527,12 +3896,22 @@ class App(tk.Tk):
                  font=(FF,10), width=10).pack(side='left')
         return sl, val_var
 
-    def _scrollable(self, parent):
-        """Return (canvas, inner_frame) with a vertical scrollbar."""
+    def _scrollable(self, parent, autohide=False):
+        """Return the inner frame of a canvas with a vertical scrollbar. With autohide, the scrollbar only shows
+        while the content is taller than the canvas."""
         c   = tk.Canvas(parent, bg=BG, highlightthickness=0)
         vsb = ttk.Scrollbar(parent, orient='vertical', command=c.yview)
-        c.configure(yscrollcommand=vsb.set)
-        vsb.pack(side='right', fill='y')
+        if autohide:
+            def _set(lo, hi):
+                if float(lo) <= 0.0 and float(hi) >= 1.0:
+                    vsb.pack_forget()
+                elif not vsb.winfo_ismapped():
+                    vsb.pack(side='right', fill='y', before=c)
+                vsb.set(lo, hi)
+            c.configure(yscrollcommand=_set)
+        else:
+            c.configure(yscrollcommand=vsb.set)
+            vsb.pack(side='right', fill='y')
         c.pack(side='left', fill='both', expand=True)
         inner = tk.Frame(c, bg=BG)
         wid   = c.create_window((0,0), window=inner, anchor='nw')
@@ -3665,6 +4044,27 @@ class App(tk.Tk):
         self.gate_sl, self.gate_val = self._knob_row(
             gate_sec, 'Threshold',  0, 60, 40, self._set_gate,
             fmt=lambda v: f'{-v:.0f} dBFS')
+        gm_row = tk.Frame(gate_sec, bg=PANEL); gm_row.pack(fill='x', padx=10, pady=4)
+        tk.Label(gm_row, text='Type', bg=PANEL, fg=FG, font=(FF,11), width=22, anchor='w').pack(side='left')
+        self.gate_mode_var = tk.StringVar(value=self.amp.gate_mode)
+        for val, txt in (('standard', 'Standard'), ('smart', 'Smart')):
+            tk.Radiobutton(gm_row, text=txt, variable=self.gate_mode_var, value=val,
+                           bg=PANEL, fg=FG, selectcolor='#2a3540', activebackground=PANEL,
+                           command=self._set_gate_mode).pack(side='left', padx=6)
+        tk.Label(gm_row, text='Smart: opens at the threshold, closes 6 dB lower, holds, then fades out gently',
+                 bg=PANEL, fg=DIM, font=(FF,9)).pack(side='left', padx=8)
+        # extra controls that only the Smart gate uses (shown/hidden by _gate_refresh_ui)
+        self.gate_smart_frame = tk.Frame(gate_sec, bg=PANEL)
+        self._gate_widgets = {}
+        for label, attr, lo, hi, default, fmt in (
+                ('Depth (how far it closes)', 'gate_range', 6, 90, SMART_GATE_RANGE_DB, lambda v: f'-{v:.0f} dB'),
+                ('Hold', 'gate_hold', 0, 300, SMART_GATE_HOLD_MS, lambda v: f'{v:.0f} ms'),
+                ('Release', 'gate_release', 20, 1000, SMART_GATE_RELEASE_MS, lambda v: f'{v:.0f} ms'),
+                ('Hush (fade into the noise)', 'gate_hush', 0.0, 1.0, SMART_GATE_HUSH, lambda v: f'{int(v*100)}%')):
+            sl, vv = self._knob_row(self.gate_smart_frame, label, lo, hi, default,
+                                    (lambda v, a=attr: setattr(self.amp, a, float(v))), fmt=fmt)
+            self._gate_widgets[attr] = (sl, vv, fmt)
+        self._gate_refresh_ui()
 
         # ── hum filter ────────────────────────────────────────
         hum_sec = self._sec(inner, 'Hum Filter',
@@ -3812,6 +4212,22 @@ class App(tk.Tk):
                      + (f'  ({note})' if note else ''), fg=FG)
         poll()
     def _set_gate(self, v):     self.amp.gate_thr = 10**(-float(v)/20.0)
+
+    def _set_gate_mode(self):
+        self.amp.gate_mode = 'smart' if self.gate_mode_var.get() == 'smart' else 'standard'
+        self._gate_refresh_ui()
+
+    def _gate_refresh_ui(self):
+        """Show the Smart gate's extra controls only while Smart is selected."""
+        if self.gate_mode_var.get() == 'smart':
+            self.gate_smart_frame.pack(fill='x')
+        else:
+            self.gate_smart_frame.pack_forget()
+
+    def _gate_widget_set(self, attr, value):
+        """Move a Smart gate slider and its readout to a restored value without re-firing its callback."""
+        sl, vv, fmt = self._gate_widgets[attr]
+        self._set_knob(sl, vv, value, fmt(value))
 
     def _set_panic(self, v):
         """The one place that actually flips amp.panic — the footer
@@ -4105,6 +4521,11 @@ class App(tk.Tk):
             'eq_band_gains': [b['gain'] for b in amp.eq.bands],
             'eq_level':      amp.eq.level_db,
             'gate_threshold': amp.gate_thr,
+            'gate_mode':     amp.gate_mode,
+            'gate_range':    amp.gate_range,
+            'gate_release':  amp.gate_release,
+            'gate_hold':     amp.gate_hold,
+            'gate_hush':     amp.gate_hush,
             'in_gain':       amp.in_gain,
             'out_gain':      amp.out_gain,
             'hum_on':        amp.hum.on,
@@ -4186,6 +4607,22 @@ class App(tk.Tk):
             v = -20.0 * math.log10(thr)
             self._set_knob(self.gate_sl, self.gate_val, v, f'{-v:.0f} dBFS')
 
+        # Smart-gate settings. A profile saved before the Smart mode existed has none of these keys and
+        # gets the standard gate, which is what it always used.
+        amp.gate_mode = 'smart' if data.get('gate_mode') == 'smart' else 'standard'
+        self.gate_mode_var.set(amp.gate_mode)
+        for key, attr, lo, hi, default in (('gate_range', 'gate_range', 6.0, 90.0, SMART_GATE_RANGE_DB),
+                                           ('gate_release', 'gate_release', 20.0, 1000.0, SMART_GATE_RELEASE_MS),
+                                           ('gate_hold', 'gate_hold', 0.0, 300.0, SMART_GATE_HOLD_MS),
+                                           ('gate_hush', 'gate_hush', 0.0, 1.0, SMART_GATE_HUSH)):
+            try:
+                val = max(lo, min(hi, float(data.get(key, default))))
+            except (TypeError, ValueError):
+                val = default
+            setattr(amp, attr, val)
+            self._gate_widget_set(attr, val)
+        self._gate_refresh_ui()
+
         if 'in_gain' in data:
             amp.in_gain = float(data['in_gain'])
             v = 20.0 * math.log10(max(1e-9, amp.in_gain))
@@ -4208,9 +4645,15 @@ class App(tk.Tk):
             if order is not None:
                 amp.pedals.order = order
         for field in PEDAL_PROFILE_FIELDS:
-            if field == 'order' or field not in pedal_data:
+            if field == 'order':
                 continue
-            setattr(amp.pedals, field, pedal_data[field])
+            if field in pedal_data:
+                setattr(amp.pedals, field, pedal_data[field])
+            else:
+                # A profile is a whole sound, not a patch: a setting it doesn't mention (saved before that
+                # pedal or option existed, e.g. the phaser) goes back to its factory value, rather than
+                # keeping whatever the previous profile had set.
+                setattr(amp.pedals, field, PEDAL_FACTORY_VALUES[field])
         self._rebuild_pedals_ui()  # also re-applies amp.pedals.order via _relayout_pedals()
 
         if 'midi_mappings' in data:
@@ -4305,19 +4748,6 @@ class App(tk.Tk):
     # favorite pedal setting can be reused across different profiles
     # rather than being locked inside whichever profile it was saved in.
 
-    def _build_pedal_preset_row(self, parent, code):
-        row = tk.Frame(parent, bg=PANEL); row.pack(fill='x', padx=10, pady=(6,2))
-        ttk.Button(row, text='Save Preset…',
-                   command=lambda c=code: self._save_pedal_preset(c)).pack(side='left')
-        ttk.Button(row, text='Load Preset…',
-                   command=lambda c=code: self._load_pedal_preset(c)).pack(side='left', padx=4)
-        name = self._pedal_preset_name.get(code)
-        lbl = tk.Label(row, text=(f'Preset: {name}' if name else 'No preset loaded'),
-                       bg=PANEL, fg=(FG if name else DIM), font=(FF,9))
-        lbl.pack(side='left', padx=10)
-        self._pedal_preset_labels = getattr(self, '_pedal_preset_labels', {})
-        self._pedal_preset_labels[code] = lbl
-
     def _save_pedal_preset(self, code):
         default_dir = PEDAL_PRESET_DIR / code
         default_dir.mkdir(exist_ok=True)
@@ -4373,6 +4803,10 @@ class App(tk.Tk):
         for f in PEDAL_PRESET_FIELDS[code]:
             if f in fields:
                 setattr(self.amp.pedals, f, fields[f])
+            else:
+                # a preset saved before this option existed (e.g. a Reverb preset made before the reverb
+                # had types) means the original behaviour: the factory value, not whatever is set now
+                setattr(self.amp.pedals, f, PEDAL_FACTORY_VALUES[f])
         self._pedal_preset_name[code] = data.get('name') or pathlib.Path(path).stem
         self._rebuild_pedals_ui()  # simplest way to reflect every changed slider/radio/checkbox at once
 
@@ -4825,9 +5259,330 @@ class App(tk.Tk):
             if self._tick_n % 20 == 0 and hasattr(self, 'reamp_sound_lbl'):
                 self.reamp_sound_lbl.configure(text=f'Sound: {self._rec_profile_name()}'
                                                if self._current_profile_path else 'Sound: current settings')
+            if self._tick_n % 20 == 0 and hasattr(self, 'tg_sound_lbl') and not getattr(self, '_tg_busy', False):
+                self._tg_refresh_sound()
         except tk.TclError:
             pass
+        except Exception:
+            # Anything unexpected must not kill the timer for good: the next
+            # tick would never be scheduled and the meter and counter would
+            # freeze for the rest of the session.
+            if not getattr(self, '_rec_tick_err_shown', False):
+                self._rec_tick_err_shown = True
+                traceback.print_exc()
         self.after(50, self._rec_tick)
+
+    # ── Tank-G tab (optional add-on) ─────────────────────────
+
+    @staticmethod
+    def _open_url(url):
+        __import__('webbrowser').open(url)
+
+    def _tab_tankg(self, root):
+        """Send the current sound to a Tank-G pedal running the UltraRig
+        firmware. Only built when the tankg-bridge add-on is present."""
+        api = self._tankg
+        inner = self._scrollable(root)
+        self._tg_ports = {}
+        self._tg_state = None
+        self._tg_busy = False
+        self._tg_after_read = None
+        self._tg_reread = False
+        if not hasattr(self, '_tg_q'):
+            self._tg_q = queue.Queue()
+        if not hasattr(self, 'tg_port_var'):
+            self.tg_port_var = tk.StringVar()
+            self.tg_slot_var = tk.StringVar()
+        self._tg_saved_port = getattr(self, '_tg_saved_port', None)
+
+        sec = self._sec(inner, 'Tank-G pedal')
+        # Up front, ahead of everything else: without the third-party firmware nothing on this tab can work.
+        notice = tk.Frame(sec, bg=ACCENT_DIM, highlightthickness=1, highlightbackground=ACCENT)
+        notice.pack(fill='x', padx=10, pady=(8, 2))
+        tk.Label(notice, text='⚠  Needs the UltraRig firmware on your Tank-G', bg=ACCENT_DIM, fg=ACCENT,
+                 font=(FF, 11, 'bold'), anchor='w').pack(fill='x', padx=10, pady=(8, 2))
+        tk.Label(notice,
+                 text='SoloTone talks to the pedal over USB using UltraRig\'s own commands. A Tank-G that is still '
+                      'running the stock M-VAVE firmware does not understand them, so nothing on this tab will work '
+                      'with it: it cannot be read and nothing can be sent. UltraRig is a separate, third-party '
+                      'project (not made by SoloTone or M-VAVE). Installing it replaces the pedal\'s stock '
+                      'firmware, so read its instructions first and keep the backup of your original firmware '
+                      'that its installer saves.',
+                 bg=ACCENT_DIM, fg=FG, font=(FF, 9), anchor='w', justify='left', wraplength=680
+                 ).pack(fill='x', padx=10, pady=(0, 4))
+        link = tk.Label(notice, text='Get UltraRig (firmware and installer) ↗', bg=ACCENT_DIM, fg=ACCENT,
+                        font=(FF, 10, 'underline'), cursor='hand2', anchor='w')
+        link.pack(anchor='w', padx=10, pady=(0, 8))
+        link.bind('<Button-1>', lambda e: self._open_url(ULTRARIG_URL))
+        self.tg_ultrarig_link = link
+        tk.Label(sec,
+                 text='Sends the sound you have loaded right now (capture, cab IR and the whole pedal chain) '
+                      'to a M-VAVE Tank-G running the UltraRig firmware, and can save it as a preset on the pedal. '
+                      'Close the UltraRig control page first: only one program can use the USB connection.',
+                 bg=PANEL, fg=DIM, font=(FF, 9), anchor='w', justify='left', wraplength=700
+                 ).pack(fill='x', padx=10, pady=(8, 4))
+        ok, why = api.available()
+        if not ok:
+            tk.Label(sec, text=f'The Tank-G add-on can\'t run yet: {why}', bg=PANEL, fg=RED,
+                     font=(FF, 10), anchor='w', justify='left', wraplength=700
+                     ).pack(fill='x', padx=10, pady=(4, 10))
+            return
+
+        pr = tk.Frame(sec, bg=PANEL); pr.pack(fill='x', padx=10, pady=4)
+        tk.Label(pr, text='Port:', bg=PANEL, fg=FG, font=(FF, 11), width=9).pack(side='left')
+        self.tg_port_box = ttk.Combobox(pr, textvariable=self.tg_port_var, state='readonly', width=48)
+        self.tg_port_box.pack(side='left', padx=4)
+        ttk.Button(pr, text='⟳', width=3, command=self._tg_refresh_ports).pack(side='left', padx=4)
+        self.tg_read_btn = ttk.Button(pr, text='Read pedal', command=self._tg_read)
+        self.tg_read_btn.pack(side='left', padx=4)
+        self.tg_status_lbl = tk.Label(sec, text='Not connected yet. Press Read pedal.', bg=PANEL, fg=DIM,
+                                      font=(FF, 10), anchor='w', justify='left', wraplength=700)
+        self.tg_status_lbl.pack(fill='x', padx=10, pady=(2, 8))
+
+        dest = self._sec(inner, 'Send the current sound')
+        self.tg_sound_lbl = tk.Label(dest, text='', bg=PANEL, fg=ACCENT, font=(FF, 10), anchor='w')
+        self.tg_sound_lbl.pack(fill='x', padx=10, pady=(8, 2))
+        sr_ = tk.Frame(dest, bg=PANEL); sr_.pack(fill='x', padx=10, pady=4)
+        tk.Label(sr_, text='Preset slot:', bg=PANEL, fg=FG, font=(FF, 11), width=9).pack(side='left')
+        self.tg_slot_box = ttk.Combobox(sr_, textvariable=self.tg_slot_var, state='readonly', width=48)
+        self.tg_slot_box.pack(side='left', padx=4)
+        self._tg_user_picked = False
+        self.tg_slot_box.bind('<<ComboboxSelected>>', lambda e: setattr(self, '_tg_user_picked', True))
+        br = tk.Frame(dest, bg=PANEL); br.pack(fill='x', padx=10, pady=(6, 4))
+        self.tg_save_btn = ttk.Button(br, text='⬆  SAVE TO SLOT', style='Go.TButton', command=self._tg_save)
+        self.tg_save_btn.pack(side='left')
+        self.tg_play_btn = ttk.Button(br, text='Play on pedal (don\'t save)', command=self._tg_play)
+        self.tg_play_btn.pack(side='left', padx=8)
+        self.tg_prog = ttk.Progressbar(br, mode='determinate', maximum=100)
+        self.tg_prog.pack(side='left', fill='x', expand=True, padx=8)
+        tk.Label(dest,
+                 text='Save writes the NAM capture and the cab IR to free library slots on the pedal and stores the '
+                      'preset. It never deletes anything, and asks before replacing a preset. Play on pedal only '
+                      'loads the sound into the running pedal. The pedal\'s own input/output gain is not changed.',
+                 bg=PANEL, fg=DIM, font=(FF, 9), anchor='w', justify='left', wraplength=700
+                 ).pack(fill='x', padx=10, pady=(2, 6))
+
+        lg = tk.Frame(dest, bg=PANEL); lg.pack(fill='x', padx=10, pady=(0, 10))
+        self.tg_log = tk.Text(lg, height=9, bg=BG_WELL, fg=FG, font=(FF, 9), relief='flat', wrap='word',
+                              highlightthickness=1, highlightbackground='#2c333b', state='disabled')
+        lsb = ttk.Scrollbar(lg, orient='vertical', command=self.tg_log.yview)
+        self.tg_log.configure(yscrollcommand=lsb.set)
+        self.tg_log.pack(side='left', fill='x', expand=True)
+        lsb.pack(side='left', fill='y')
+        self._tg_btns = [self.tg_read_btn, self.tg_save_btn, self.tg_play_btn]
+
+        self._tg_refresh_ports()
+        self._tg_fill_slots()
+        self._tg_refresh_sound()
+        if not getattr(self, '_tg_polling', False):
+            self._tg_polling = True
+            self.after(100, self._tg_poll)
+
+    def _tg_refresh_sound(self):
+        try:
+            self.tg_sound_lbl.configure(text=f'Sound: {self._rec_profile_name()}'
+                                        if self._current_profile_path else 'Sound: current settings (not saved as a profile)')
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _tg_port_device(self):
+        return self._tg_ports.get(self.tg_port_var.get())
+
+    def _tg_select_port(self, device):
+        for label, dev in self._tg_ports.items():
+            if dev == device:
+                self.tg_port_var.set(label)
+                return True
+        return False
+
+    def _tg_refresh_ports(self):
+        try:
+            ports = self._tankg.find_ports()
+        except Exception:
+            ports = []
+        self._tg_ports = {f'{dev}   {desc}' + ('   (Tank-G)' if pedal else ''): dev for dev, desc, pedal in ports}
+        labels = list(self._tg_ports)
+        self.tg_port_box.configure(values=labels)
+        want = self._tg_port_device() or self._tg_saved_port
+        if not (want and self._tg_select_port(want)):
+            pedal = next((l for l in labels if l.endswith('(Tank-G)')), labels[0] if labels else '')
+            self.tg_port_var.set(pedal)
+
+    def _tg_fill_slots(self):
+        api = self._tankg
+        used = self._tg_state['presets'] if self._tg_state else {}
+        known = self._tg_state is not None
+        vals = []
+        for n in range(32):
+            if n in used:
+                vals.append(f'{api.slot_label(n)}    {used[n]}   (in use)')
+            else:
+                vals.append(f'{api.slot_label(n)}    ' + ('empty' if known else ''))
+        keep = self.tg_slot_box.current()
+        self.tg_slot_box.configure(values=vals)
+        # A slot the user picked by hand stays picked (even an occupied one,
+        # which is how you replace a preset); otherwise suggest the first free one.
+        if keep < 0 or (known and keep in used and not getattr(self, '_tg_user_picked', False)):
+            keep = next((n for n in range(32) if n not in used), 0)
+        self.tg_slot_box.current(keep)
+
+    def _tg_set_busy(self, busy, msg=None):
+        self._tg_busy = busy
+        for b in getattr(self, '_tg_btns', []):
+            try: b.configure(state='disabled' if busy else 'normal')
+            except tk.TclError: pass
+        if msg is not None:
+            self._tg_status(msg)
+        if not busy:
+            try: self.tg_prog.configure(value=0)
+            except tk.TclError: pass
+
+    def _tg_status(self, text, bad=False):
+        try: self.tg_status_lbl.configure(text=text, fg=RED if bad else FG)
+        except tk.TclError: pass
+
+    def _tg_logline(self, text):
+        try:
+            self.tg_log.configure(state='normal')
+            self.tg_log.insert('end', text + '\n')
+            self.tg_log.see('end')
+            self.tg_log.configure(state='disabled')
+        except tk.TclError:
+            pass
+
+    # reading the pedal -------------------------------------------------
+    def _tg_read(self):
+        if self._tg_busy:
+            return
+        dev = self._tg_port_device()
+        if not dev:
+            self._tg_status('Pick the pedal\'s USB port first (the ⟳ button re-scans).', bad=True)
+            self._tg_after_read = None
+            return
+        self._tg_set_busy(True, 'Reading the pedal…')
+        threading.Thread(target=self._tg_read_worker, args=(dev,), daemon=True).start()
+
+    def _tg_read_worker(self, dev):
+        try:
+            self._tg_q.put(('state', self._tankg.read_state(dev)))
+        except Exception as e:
+            self._tg_q.put(('err_read', str(e)))
+        self._tg_q.put(('done',))
+
+    # sending -----------------------------------------------------------
+    def _tg_play(self):
+        if self._tg_busy:
+            return
+        dev = self._tg_port_device()
+        if not dev:
+            self._tg_status('Pick the pedal\'s USB port first.', bad=True)
+            return
+        self._tg_start(dev, save=False, slot=None, overwrite=False)
+
+    def _tg_save(self):
+        """Save needs to know what is already on the pedal, so it reads first
+        and then continues in _tg_confirm_and_send."""
+        if self._tg_busy:
+            return
+        self._tg_after_read = 'save'
+        self._tg_read()
+
+    def _tg_confirm_and_send(self):
+        api = self._tankg
+        n = self.tg_slot_box.current()
+        if n < 0:
+            messagebox.showinfo('Pick a slot', 'Choose a preset slot first.')
+            return
+        used = self._tg_state['presets']
+        name = self._rec_profile_name() if self._current_profile_path else 'SoloTone'
+        label = api.slot_label(n)
+        if not messagebox.askyesno(
+                'Send to the Tank-G',
+                f'Save "{name}" as preset {label} on the pedal?\n\n'
+                'This replaces whatever is playing on the pedal right now (unsaved edits there are lost) and '
+                'writes the capture, the cab IR and the preset to its memory. Nothing already stored is deleted.'):
+            return
+        overwrite = False
+        if n in used:
+            if not messagebox.askyesno(
+                    'Replace this preset?',
+                    f'Preset {label} already holds "{used[n]}".\n\nReplace it with "{name}"? This can\'t be undone.',
+                    icon='warning', default='no'):
+                return
+            overwrite = True
+        self._tg_start(self._tg_port_device(), save=True, slot=n, overwrite=overwrite)
+
+    def _tg_start(self, dev, save, slot, overwrite):
+        self._tg_refresh_sound()
+        profile = self._gather_profile_dict(self._rec_profile_name() if self._current_profile_path else 'SoloTone')
+        try:
+            self.tg_log.configure(state='normal'); self.tg_log.delete('1.0', 'end'); self.tg_log.configure(state='disabled')
+        except tk.TclError:
+            pass
+        self._tg_set_busy(True, 'Sending to the pedal…')
+        threading.Thread(target=self._tg_send_worker, args=(profile, dev, save, slot, overwrite), daemon=True).start()
+
+    def _tg_send_worker(self, profile, dev, save, slot, overwrite):
+        q = self._tg_q
+        try:
+            self._tankg.send_sound(
+                profile, dev, preset_slot=slot, save=save, overwrite_preset=overwrite,
+                audio_loader=ir_to_48k_mono,
+                log=lambda s: q.put(('log', s)),
+                progress=lambda f, s='': q.put(('prog', f, s)))
+            q.put(('ok', save, slot))
+        except Exception as e:
+            q.put(('err_send', str(e)))
+        q.put(('done',))
+
+    # main-thread side of the worker queue ------------------------------
+    def _tg_poll(self):
+        try:
+            while True:
+                try:
+                    item = self._tg_q.get_nowait()
+                except queue.Empty:
+                    break
+                kind = item[0]
+                if kind == 'log':
+                    self._tg_logline(item[1])
+                elif kind == 'prog':
+                    self.tg_prog.configure(value=item[1] * 100)
+                    if item[2]:
+                        self._tg_status(item[2] + '…')
+                elif kind == 'state':
+                    self._tg_state = item[1]
+                    s = item[1]
+                    self._tg_fill_slots()
+                    self._tg_status(f'Connected. {len(s["presets"])} preset(s), {len(s["caps"])} of {s["cap_slots"]} '
+                                    f'capture slots and {len(s["irs"])} of {s["ir_slots"]} IR slots in use.')
+                elif kind == 'ok':
+                    if item[1]:
+                        self._tg_status(f'Saved as preset {self._tankg.slot_label(item[2])} on the pedal.')
+                        self._tg_user_picked = False        # next suggestion: the next free slot
+                        self._tg_logline('Done.')
+                        self._tg_reread = True
+                    else:
+                        self._tg_status('Playing on the pedal (nothing was saved).')
+                        self._tg_logline('Done. Nothing was saved to the pedal.')
+                elif kind == 'err_read':
+                    self._tg_after_read = None
+                    self._tg_status(item[1], bad=True)
+                elif kind == 'err_send':
+                    self._tg_status(item[1], bad=True)
+                    self._tg_logline('Failed: ' + item[1])
+                    messagebox.showerror('Tank-G', item[1])
+                elif kind == 'done':
+                    self._tg_set_busy(False)
+                    if self._tg_after_read == 'save' and self._tg_state is not None:
+                        self._tg_after_read = None
+                        self._tg_confirm_and_send()
+                    elif self._tg_reread:
+                        self._tg_reread = False
+                        self._tg_read()
+        except tk.TclError:
+            pass
+        self.after(100, self._tg_poll)
 
     # ── re-amp ───────────────────────────────────────────────
 
@@ -6265,6 +7020,9 @@ class App(tk.Tk):
             if 'metro_mute' in s:
                 self.metro_mute_var.set(bool(s['metro_mute']))
                 self.metro.mute = self.metro_mute_var.get()
+            self._tg_saved_port = s.get('tankg_port')
+            if self._tg_saved_port and hasattr(self, 'tg_port_box'):
+                self._tg_select_port(self._tg_saved_port)
             if 'a4' in s:        self.a4.set(s['a4']); self.a4_lbl.configure(text=str(int(s['a4'])))
             if 'transpose' in s: self.trans_var.set(s['transpose'])
             if 'loop_len' in s:  self.loop_len_var.set(s['loop_len'])
@@ -6396,6 +7154,8 @@ class App(tk.Tk):
                 'keybind_mappings': dict(self.keybind_mappings),
                 'nudge_step_pct':   self.nudge_step_var.get(),
                 'section_collapsed': self._section_collapsed,
+                'pedal_panel': {'open': list(getattr(self, '_insp_open', [])), 'sel': getattr(self, '_insp_sel', None),
+                                'h': int(getattr(self, '_insp_h', 260))},
                 'theme_accent':  ACCENT,
                 'theme_bg':      BG,
                 'always_on_top': self.always_on_top_var.get(),
@@ -6405,6 +7165,7 @@ class App(tk.Tk):
                 'amp_input':     self.amp_in_var.get(),
                 'amp_output':    self.amp_out_var.get(),
                 'tuner_input':   self.t_dev_var.get(),
+                'tankg_port':    (self._tg_port_device() if hasattr(self, 'tg_port_box') else getattr(self, '_tg_saved_port', None)),
             }
             with open(SESSION_FILE, 'w') as f:
                 json.dump(s, f, indent=2)
@@ -6416,438 +7177,594 @@ class App(tk.Tk):
 
     # ── TAB: Pedals ──────────────────────────────────────────
 
+    # ── Pedals tab: the board (chain + inactive tray) on top, an IDE-style inspector docked below ──
+
+    def _mini_btn(self, parent, text, command, **kw):
+        """A small flat button (a Label with button behaviour), compact enough for the inspector."""
+        b = tk.Label(parent, text=text, bg='#262626', fg=FG, font=(FF, 9), padx=6, pady=1, cursor='hand2',
+                     highlightthickness=1, highlightbackground='#3a3a3a', disabledforeground='#555555', **kw)
+
+        def _click(_e):
+            if str(b.cget('state')) != 'disabled':
+                command()
+        b.bind('<Button-1>', _click)
+        b.bind('<Enter>', lambda e: b.configure(bg='#333333') if str(b.cget('state')) != 'disabled' else None)
+        b.bind('<Leave>', lambda e: b.configure(bg='#262626'))
+        return b
+
+    def _bind_wheel(self, canvas):
+        """Mouse-wheel scrolling for a scrollable canvas: one app-wide handler finds the scroll area under the pointer."""
+        if not hasattr(self, '_wheel_canvases'):
+            self._wheel_canvases = []
+        self._wheel_canvases.append(canvas)
+        if getattr(self, '_wheel_bound', False):
+            return
+        self._wheel_bound = True
+
+        def _wheel(e):
+            w = e.widget
+            while w is not None and not isinstance(w, str):
+                if w in self._wheel_canvases:
+                    try:
+                        if w.winfo_exists() and w.bbox('all') and w.bbox('all')[3] > w.winfo_height():
+                            w.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), 'units')
+                    except tk.TclError:
+                        pass
+                    return
+                w = getattr(w, 'master', None)
+        self.bind_all('<MouseWheel>', _wheel, add='+')
+
+    def _pedal_page(self, code):
+        """One pedal's page in the inspector: a header row (on/off, presets, position) and a flow of control cards."""
+        page = tk.Frame(self._insp_body, bg=BG)
+        page.head = tk.Frame(page, bg=BG)
+        page.head.pack(fill='x', padx=8, pady=(6, 2))
+        page.flow = _FlowFrame(page, BG)
+        page.flow.pack(fill='x', padx=8, pady=(2, 6))
+        self._pedal_pages[code] = page
+        return page
+
+    def _pcard(self, page, title):
+        """A titled group of controls inside a pedal's page."""
+        card = tk.Frame(page.flow, bg=PANEL, highlightthickness=1, highlightbackground='#2e2e2e')
+        tk.Label(card, text=title, bg=PANEL, fg=ACCENT, font=(FF, 9, 'bold'), anchor='w').pack(fill='x', padx=8, pady=(4, 1))
+        page.flow.add(card)
+        return card
+
     def _tab_pedals(self, root):
-        inner = self._scrollable(root)
-        self._pedals_canvas = inner.master   # the Canvas _scrollable() built inner on top of — see _jump_to_pedal_section()
-        self._fx_outer = {}   # name -> outer section frame, for re-packing on reorder
-        self._fx_rows  = {}   # name -> {pos_var, up, down}, for the reorder row
-        # attr name -> {'kind': 'slider'|'radio', 'widget', 'val_var', 'fmt'}
-        # so _pedal_widget_sync() can move the right on-screen control when
-        # a pedal parameter changes from something other than this tab's
-        # own widgets — MIDI CC, or a long-press mode-cycle.
-        self._pedal_widgets = {}
-        # code -> on/off BooleanVar, so _update_pedal_led() can read the
-        # var directly instead of amp.pedals.<code>_on — a MIDI toggle
-        # action calls var.set() *before* it updates the pedal attribute
-        # (see _midi_toggle_action), so reading the attribute from inside
-        # the var's own write-trace would see the stale, pre-toggle value.
+        self._pedal_widgets = {}   # attr name -> {'kind': 'slider'|'radio', 'widget', 'val_var', 'fmt'}, for _pedal_widget_sync()
+        self._fx_rows = {}         # name -> {pos_var, up, down, side}, for the position row
+        self._pedal_pages = {}     # code -> that pedal's page in the inspector
+        self._wheel_canvases = []
+        # code -> on/off BooleanVar. _update_pedal_led() reads the var rather than amp.pedals.<code>_on, because a
+        # MIDI toggle sets the var *before* it updates the attribute (see _midi_toggle_action).
         self._pedal_on_vars = {}
-        # Every default below reads the pedal's current live value (rather
-        # than a hardcoded literal) so this tab reflects the real state
-        # both on first build and after being rebuilt post-profile-load.
+        if not hasattr(self, '_insp_open'):
+            self._insp_open, self._insp_sel, self._insp_h, self._insp_max = [], None, 260, False
         p = self.amp.pedals
 
-        def on_off(sec_frame, attr, label_text):
-            """Returns (header_frame, on_var) for a pedal section. Default
-            reflects the pedal's current state rather than a hardcoded
-            False, so rebuilding this tab after a profile load shows the
-            real state instead of resetting the display to off."""
-            h = tk.Frame(sec_frame, bg=PANEL); h.pack(fill='x', padx=10, pady=(6,2))
+        # ── containers: a vertical splitter, board above, inspector below (only present while a pedal is open) ──
+        paned = tk.PanedWindow(root, orient='vertical', sashwidth=7, sashrelief='flat', bd=0, bg=BG, opaqueresize=True)
+        paned.pack(fill='both', expand=True)
+        self._pedals_paned = paned
+        board_host = tk.Frame(paned, bg=BG)
+        board_inner = self._scrollable(board_host, autohide=True)
+        self._bind_wheel(board_inner.master)
+        self._pedals_canvas = board_inner.master
+        self._board_inner = board_inner
+        self._board_host = board_host
+        paned.add(board_host, stretch='always', minsize=120)
+        insp = tk.Frame(paned, bg=PANEL)
+        self._insp = insp
+        tk.Frame(insp, bg=ACCENT, height=2).pack(fill='x')
+        hdr = tk.Frame(insp, bg='#171717')
+        hdr.pack(fill='x')
+        title = tk.Frame(hdr, bg='#171717')
+        title.pack(side='left', padx=(10, 0), pady=3)
+        self._insp_swatch = tk.Canvas(title, width=10, height=10, bg='#171717', highlightthickness=0)
+        self._insp_swatch.pack(side='left', padx=(0, 6))
+        self._insp_title = tk.Label(title, text='', bg='#171717', fg=FG, font=(FF, 10, 'bold'))
+        self._insp_title.pack(side='left')
+        tk.Label(title, text='   click another pedal on the board to switch  ·  click this one again to close',
+                 bg='#171717', fg=DIM, font=(FF, 8)).pack(side='left')
+        acts = tk.Frame(hdr, bg='#171717')
+        acts.pack(side='right', padx=4, pady=3)
+        self._insp_max_btn = self._mini_btn(acts, 'Maximize', self._insp_toggle_max)
+        self._insp_max_btn.pack(side='left', padx=2)
+        self._mini_btn(acts, '✕', self._insp_close_all).pack(side='left', padx=2)
+        body = tk.Frame(insp, bg=BG)
+        body.pack(fill='both', expand=True)
+        self._insp_body = self._scrollable(body, autohide=True)
+        self._bind_wheel(self._insp_body.master)
+        paned.bind('<Configure>', lambda e: self._insp_fit_later())
+
+        def on_off(head, attr, label_text):
+            """(frame, on_var) for a pedal's Enabled checkbox. The default is the pedal's live state, so rebuilding
+            the tab after a profile load shows the real state."""
+            h = tk.Frame(head, bg=BG)
+            h.pack(side='left', padx=(0, 12))
             v = tk.BooleanVar(value=bool(getattr(self.amp.pedals, attr)))
+
             def _tog():
                 setattr(self.amp.pedals, attr, v.get())
             ttk.Checkbutton(h, text=label_text, variable=v, command=_tog).pack(side='left')
-            # Tracing the Variable itself (rather than only this checkbox's
-            # own command) catches every way it can change — a MIDI pad or
-            # a keybind toggling the pedal both call var.set() on this same
-            # object — so the status-strip LED above stays in sync no
-            # matter which input method flipped the pedal.
+            # Tracing the variable itself catches every way it can change (a MIDI pad, a keybind, the board's LED)
             if attr.endswith('_on'):
                 code = attr[:-3]
                 self._pedal_on_vars[code] = v
                 v.trace_add('write', lambda *_a, code=code: self._update_pedal_led(code))
             return h, v
 
-        def _sl(parent, label, lo, hi, default, cb, fmt=None, length=220, attr=None):
-            row = tk.Frame(parent, bg=PANEL); row.pack(fill='x', padx=10, pady=3)
-            tk.Label(row, text=label, bg=PANEL, fg=FG, font=(FF,10), width=18, anchor='w').pack(side='left')
+        def _sl(parent, label, lo, hi, default, cb, fmt=None, length=70, attr=None):
+            row = tk.Frame(parent, bg=PANEL)
+            row.pack(fill='x', padx=8, pady=1)
+            tk.Label(row, text=label, bg=PANEL, fg=FG, font=(FF, 9), width=15, anchor='w').pack(side='left')
             vv = tk.StringVar(value=(fmt(default) if fmt else f'{default:.2f}'))
+
             def _cmd(v):
                 fv = float(v)
                 vv.set(fmt(fv) if fmt else f'{fv:.2f}')
                 cb(fv)
             sl = self._scale(row, lo, hi, _cmd, default, length=length)
-            sl.pack(side='left', padx=6)
-            tk.Label(row, textvariable=vv, bg=PANEL, fg=DIM, font=(FF,10), width=8).pack(side='left')
+            sl.pack(side='left', padx=4, fill='x', expand=True)
+            tk.Label(row, textvariable=vv, bg=PANEL, fg=DIM, font=(FF, 9), width=7, anchor='w').pack(side='left')
             if attr:
                 self._pedal_widgets[attr] = dict(kind='slider', widget=sl, val_var=vv, fmt=fmt)
             return sl
 
         def _radio_row(parent, label, options, attr, default):
-            row = tk.Frame(parent, bg=PANEL); row.pack(fill='x', padx=10, pady=3)
-            tk.Label(row, text=label, bg=PANEL, fg=FG, font=(FF,10), width=18, anchor='w').pack(side='left')
+            row = tk.Frame(parent, bg=PANEL)
+            row.pack(fill='x', padx=8, pady=1)
+            if label:
+                tk.Label(row, text=label, bg=PANEL, fg=FG, font=(FF, 9), width=7, anchor='w').pack(side='left')
             v = tk.StringVar(value=default)
             for val, txt in options:
-                tk.Radiobutton(row, text=txt, variable=v, value=val,
-                               bg=PANEL, fg=FG, selectcolor='#2a3540',
-                               activebackground=PANEL,
+                tk.Radiobutton(row, text=txt, variable=v, value=val, bg=PANEL, fg=FG, selectcolor='#2a3540',
+                               activebackground=PANEL, font=(FF, 9), pady=0,
                                command=lambda a=attr, vv=v: setattr(self.amp.pedals, a, vv.get())
-                               ).pack(side='left', padx=6)
+                               ).pack(side='left', padx=3)
             self._pedal_widgets[attr] = dict(kind='radio', widget=v)
             return v
 
-        # ── Mute ─────────────────────────────────────────────
-        mute_sec = self._sec(inner, 'Tuner Mute')
-        mh = tk.Frame(mute_sec, bg=PANEL); mh.pack(fill='x', padx=10, pady=6)
-        self.mute_var = tk.BooleanVar(value=p.mute)
-        tk.Checkbutton(mh, text='MUTE  (silence amp input — tune up without the amp hearing you)',
-                       variable=self.mute_var, bg=PANEL, fg=FG,
-                       selectcolor='#2a3540', activebackground=PANEL,
-                       font=(FF,11,'bold'),
-                       command=lambda: setattr(self.amp.pedals, 'mute', self.mute_var.get())
-                       ).pack(side='left')
+        def _note(parent, text):
+            tk.Label(parent, text=text, bg=PANEL, fg=DIM, font=(FF, 8), wraplength=250, justify='left', anchor='w'
+                     ).pack(anchor='w', padx=8, pady=(1, 4))
 
-        # ── Chain order ──────────────────────────────────────
-        order_sec = self._sec(inner, 'Chain Order')
-        order_row = tk.Frame(order_sec, bg=PANEL); order_row.pack(fill='x', padx=10, pady=6)
-        ttk.Button(order_row, text='Reset to Default Order',
-                   command=self._reset_pedal_order).pack(side='left')
-        tk.Label(order_row,
-                 text=f'Default: {" → ".join(DEFAULT_PEDAL_ORDER)}',
-                 bg=PANEL, fg=DIM, font=(FF,9)).pack(side='left', padx=10)
+        def _head(page, code, label):
+            """The page header: Enabled, preset buttons, and the position buttons on the right."""
+            _, var = on_off(page.head, code + '_on', label)
+            self._build_pedal_preset_row(page.head, code)
+            self._fx_reorder_row(page.head, code)
+            return var
 
-        # ── Pedal status strip ────────────────────────────────
-        self._build_pedal_status_strip(inner)
-
-        # ── Compressor (tube-style) ────────────────────────────
-        comp_sec = self._sec(inner, PEDAL_SECTION_TITLES['comp'],
-                             group=PEDALS_ACCORDION_GROUP, default_collapsed=False)
-        self._fx_outer['comp'] = comp_sec.master
-        self._fx_reorder_row(comp_sec, 'comp')
-        self._build_pedal_preset_row(comp_sec, 'comp')
-        _, self.comp_var = on_off(comp_sec, 'comp_on', 'Compressor  Enabled')
-        _sl(comp_sec, 'Threshold (dB)', -40.0, 0.0, p.comp_thresh,
-            lambda v: setattr(self.amp.pedals, 'comp_thresh', v),
+        # ── Compressor ───────────────────────────────────────
+        pg = self._pedal_page('comp')
+        self.comp_var = _head(pg, 'comp', 'Enabled')
+        c = self._pcard(pg, 'Dynamics')
+        _sl(c, 'Threshold (dB)', -40.0, 0.0, p.comp_thresh, lambda v: setattr(self.amp.pedals, 'comp_thresh', v),
             fmt=lambda v: f'{v:.0f} dB', attr='comp_thresh')
-        _sl(comp_sec, 'Ratio', 1.0, 20.0, p.comp_ratio,
-            lambda v: setattr(self.amp.pedals, 'comp_ratio', v),
+        _sl(c, 'Ratio', 1.0, 20.0, p.comp_ratio, lambda v: setattr(self.amp.pedals, 'comp_ratio', v),
             fmt=lambda v: f'{v:.1f}:1', attr='comp_ratio')
-        _sl(comp_sec, 'Attack (ms)', 0.5, 50.0, p.comp_attack,
-            lambda v: setattr(self.amp.pedals, 'comp_attack', v),
+        c = self._pcard(pg, 'Timing')
+        _sl(c, 'Attack (ms)', 0.5, 50.0, p.comp_attack, lambda v: setattr(self.amp.pedals, 'comp_attack', v),
             fmt=lambda v: f'{v:.1f} ms', attr='comp_attack')
-        _sl(comp_sec, 'Release (ms)', 20.0, 500.0, p.comp_release,
-            lambda v: setattr(self.amp.pedals, 'comp_release', v),
+        _sl(c, 'Release (ms)', 20.0, 500.0, p.comp_release, lambda v: setattr(self.amp.pedals, 'comp_release', v),
             fmt=lambda v: f'{v:.0f} ms', attr='comp_release')
-        _sl(comp_sec, 'Makeup gain (dB)', 0.0, 24.0, p.comp_makeup,
-            lambda v: setattr(self.amp.pedals, 'comp_makeup', v),
+        c = self._pcard(pg, 'Output')
+        _sl(c, 'Makeup gain (dB)', 0.0, 24.0, p.comp_makeup, lambda v: setattr(self.amp.pedals, 'comp_makeup', v),
             fmt=lambda v: f'{v:+.1f} dB', attr='comp_makeup')
-        _sl(comp_sec, 'Warmth', 0.0, 1.0, p.comp_warmth,
-            lambda v: setattr(self.amp.pedals, 'comp_warmth', v),
+        _sl(c, 'Warmth', 0.0, 1.0, p.comp_warmth, lambda v: setattr(self.amp.pedals, 'comp_warmth', v),
             fmt=lambda v: f'{int(v*100)}%', attr='comp_warmth')
 
         # ── Wah ──────────────────────────────────────────────
-        wah_sec = self._sec(inner, PEDAL_SECTION_TITLES['wah'],
-                            group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['wah'] = wah_sec.master
-        self._fx_reorder_row(wah_sec, 'wah')
-        self._build_pedal_preset_row(wah_sec, 'wah')
-        _, self.wah_var = on_off(wah_sec, 'wah_on', 'Wah  Enabled')
-
-        mode_row = tk.Frame(wah_sec, bg=PANEL); mode_row.pack(fill='x', padx=10, pady=3)
-        tk.Label(mode_row, text='Mode', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
+        pg = self._pedal_page('wah')
+        self.wah_var = _head(pg, 'wah', 'Enabled')
+        mode_card = self._pcard(pg, 'Mode')
+        mode_row = tk.Frame(mode_card, bg=PANEL)
+        mode_row.pack(fill='x', padx=8, pady=1)
         self.wah_mode_var = tk.StringVar(value=p.wah_mode)
         self._pedal_widgets['wah_mode'] = dict(kind='radio', widget=self.wah_mode_var)
+
         def _tog_wah_mode():
             self.amp.pedals.wah_mode = self.wah_mode_var.get()
             self._wah_refresh_ui()
-        for val, txt in [('manual','Manual'),('auto','Auto sweep')]:
-            tk.Radiobutton(mode_row, text=txt, variable=self.wah_mode_var, value=val,
-                           bg=PANEL, fg=FG, selectcolor='#2a3540',
-                           activebackground=PANEL, command=_tog_wah_mode
-                           ).pack(side='left', padx=6)
-
-        # Range — replaces a single Frequency slider with low/high bounds
-        # shared by both the manual position and the auto sweep.
-        range_row = tk.Frame(wah_sec, bg=PANEL); range_row.pack(fill='x', padx=10, pady=3)
-        tk.Label(range_row, text='Range (Hz)', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
-        self.wah_lo_var = tk.StringVar(value=f'{int(p.wah_range_lo)} Hz')
-        def _wah_lo_cb(v):
-            fv = float(v)
-            self.amp.pedals.wah_range_lo = fv
-            self.wah_lo_var.set(f'{int(fv)} Hz')
-        self._scale(range_row, 100, 2500, _wah_lo_cb, p.wah_range_lo, length=100).pack(side='left', padx=(6,2))
-        tk.Label(range_row, textvariable=self.wah_lo_var, bg=PANEL, fg=DIM,
-                 font=(FF,9), width=7).pack(side='left')
-        tk.Label(range_row, text='to', bg=PANEL, fg=DIM, font=(FF,9)).pack(side='left', padx=4)
-        self.wah_hi_var = tk.StringVar(value=f'{int(p.wah_range_hi)} Hz')
-        def _wah_hi_cb(v):
-            fv = float(v)
-            self.amp.pedals.wah_range_hi = fv
-            self.wah_hi_var.set(f'{int(fv)} Hz')
-        self._scale(range_row, 500, 3500, _wah_hi_cb, p.wah_range_hi, length=100).pack(side='left', padx=(6,2))
-        tk.Label(range_row, textvariable=self.wah_hi_var, bg=PANEL, fg=DIM,
-                 font=(FF,9), width=7).pack(side='left')
-        tk.Label(wah_sec,
-                 text='Defaults are guitar-voiced — bass players typically want a lower sweep, e.g. 150–800 Hz',
-                 bg=PANEL, fg=DIM, font=(FF,8)).pack(anchor='w', padx=10, pady=(0,2))
-
-        # Manual-mode position — also driven by the Left/Right arrow
-        # keybinds configured on the Settings tab.
-        self.wah_manual_frame = tk.Frame(wah_sec, bg=PANEL)
-        self.wah_manual_frame.pack(fill='x', padx=10, pady=2)
-        tk.Label(self.wah_manual_frame, text='Position', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
-        self.wah_pos_var = tk.StringVar(value=f'{int(p.wah_pos*100)}%')
-        def _wah_pos_cb(v):
-            fv = float(v)
-            self.amp.pedals.wah_pos = fv
-            self.wah_pos_var.set(f'{int(fv*100)}%')
-        self.wah_pos_sl = self._scale(self.wah_manual_frame, 0.0, 1.0, _wah_pos_cb, p.wah_pos, length=220)
-        self.wah_pos_sl.pack(side='left', padx=6)
-        self._pedal_widgets['wah_pos'] = dict(kind='slider', widget=self.wah_pos_sl,
-                                               val_var=self.wah_pos_var,
-                                               fmt=lambda v: f'{int(v*100)}%')
-        tk.Label(self.wah_manual_frame, textvariable=self.wah_pos_var, bg=PANEL, fg=DIM,
-                 font=(FF,10), width=8).pack(side='left')
-        tk.Label(self.wah_manual_frame, text='◄ ► keys (see Settings tab)',
-                 bg=PANEL, fg=DIM, font=(FF,8)).pack(side='left', padx=6)
-
-        # Auto-sweep rate / intensity
-        self.wah_auto_frame = tk.Frame(wah_sec, bg=PANEL)
-        self.wah_auto_frame.pack(fill='x', padx=0, pady=0)
+        for val, txt in [('manual', 'Manual'), ('auto', 'Auto sweep'), ('envelope', 'Envelope')]:
+            tk.Radiobutton(mode_row, text=txt, variable=self.wah_mode_var, value=val, bg=PANEL, fg=FG,
+                           selectcolor='#2a3540', activebackground=PANEL, font=(FF, 9), pady=0,
+                           command=_tog_wah_mode).pack(side='left', padx=3)
+        # manual: position (also driven by the Left/Right arrow keybinds on the Settings tab)
+        self.wah_manual_frame = tk.Frame(mode_card, bg=PANEL)
+        self.wah_manual_frame.pack(fill='x')
+        _sl(self.wah_manual_frame, 'Position', 0.0, 1.0, p.wah_pos, lambda v: setattr(self.amp.pedals, 'wah_pos', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='wah_pos')
+        _note(self.wah_manual_frame, '◄ ► keys move it (see the Settings tab).')
+        # auto sweep
+        self.wah_auto_frame = tk.Frame(mode_card, bg=PANEL)
         _sl(self.wah_auto_frame, 'Sweep rate (Hz)', 0.05, 8.0, p.wah_auto_rate,
-            lambda v: setattr(self.amp.pedals, 'wah_auto_rate', v),
-            fmt=lambda v: f'{v:.2f} Hz', attr='wah_auto_rate')
+            lambda v: setattr(self.amp.pedals, 'wah_auto_rate', v), fmt=lambda v: f'{v:.2f} Hz', attr='wah_auto_rate')
         _sl(self.wah_auto_frame, 'Sweep intensity', 0.0, 1.0, p.wah_auto_depth,
-            lambda v: setattr(self.amp.pedals, 'wah_auto_depth', v),
-            fmt=lambda v: f'{int(v*100)}%', attr='wah_auto_depth')
-
-        _sl(wah_sec, 'Resonance (Q)', 1.0, 8.0, p.wah_q,
-            lambda v: setattr(self.amp.pedals, 'wah_q', v), attr='wah_q')
-
+            lambda v: setattr(self.amp.pedals, 'wah_auto_depth', v), fmt=lambda v: f'{int(v*100)}%', attr='wah_auto_depth')
+        # envelope: the filter follows how hard you pick
+        self.wah_env_frame = tk.Frame(mode_card, bg=PANEL)
+        _sl(self.wah_env_frame, 'Sensitivity', 0.0, 1.0, p.wah_env_sens,
+            lambda v: setattr(self.amp.pedals, 'wah_env_sens', v), fmt=lambda v: f'{int(v*100)}%', attr='wah_env_sens')
+        _sl(self.wah_env_frame, 'Decay', 0.0, 1.0, p.wah_env_decay,
+            lambda v: setattr(self.amp.pedals, 'wah_env_decay', v), fmt=lambda v: f'{int(v*100)}%', attr='wah_env_decay')
+        _radio_row(self.wah_env_frame, 'Filter', [('wah', 'Wah'), ('bandpass', 'Band'), ('lowpass', 'LP'), ('highpass', 'HP')],
+                   'wah_env_type', p.wah_env_type)
+        _radio_row(self.wah_env_frame, 'Sweep', [('up', 'Up'), ('down', 'Down')], 'wah_env_dir', p.wah_env_dir)
+        c = self._pcard(pg, 'Range and Q')
+        _sl(c, 'Low (Hz)', 100, 2500, p.wah_range_lo, lambda v: setattr(self.amp.pedals, 'wah_range_lo', v),
+            fmt=lambda v: f'{int(v)} Hz')
+        _sl(c, 'High (Hz)', 500, 3500, p.wah_range_hi, lambda v: setattr(self.amp.pedals, 'wah_range_hi', v),
+            fmt=lambda v: f'{int(v)} Hz')
+        _sl(c, 'Resonance (Q)', 1.0, 8.0, p.wah_q, lambda v: setattr(self.amp.pedals, 'wah_q', v),
+            fmt=lambda v: f'{v:.1f}', attr='wah_q')
+        _note(c, 'Defaults are guitar-voiced; bass players usually want a lower sweep, e.g. 150-800 Hz.')
         self._wah_refresh_ui()
 
         # ── Fuzz ─────────────────────────────────────────────
-        fuzz_sec = self._sec(inner, PEDAL_SECTION_TITLES['fuzz'],
-                             group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['fuzz'] = fuzz_sec.master
-        self._fx_reorder_row(fuzz_sec, 'fuzz')
-        self._build_pedal_preset_row(fuzz_sec, 'fuzz')
-        _, self.fuzz_var = on_off(fuzz_sec, 'fuzz_on', 'Fuzz  Enabled')
-        _radio_row(fuzz_sec, 'Type', [('fuzz_face','Fuzz Face'),('big_muff','Big Muff')],
+        pg = self._pedal_page('fuzz')
+        self.fuzz_var = _head(pg, 'fuzz', 'Enabled')
+        c = self._pcard(pg, 'Type')
+        _radio_row(c, '', [('fuzz_face', 'Fuzz Face'), ('tone_bender', 'Tone Bender'), ('big_muff', 'Big Muff')],
                    'fuzz_mode', p.fuzz_mode)
-        _sl(fuzz_sec, 'Drive', 1.0, 10.0, p.fuzz_drive,
-            lambda v: setattr(self.amp.pedals, 'fuzz_drive', v), attr='fuzz_drive')
-        _sl(fuzz_sec, 'Volume', 0.1, 1.0, p.fuzz_vol,
-            lambda v: setattr(self.amp.pedals, 'fuzz_vol', v),
+        muff_row = tk.Frame(c, bg=PANEL)
+        muff_row.pack(fill='x', padx=8, pady=1)
+        tk.Label(muff_row, text='Muff tone', bg=PANEL, fg=FG, font=(FF, 9), width=9, anchor='w').pack(side='left')
+        self.muff_tone_var = tk.StringVar(value=p.muff_tone)
+        for val, txt in [('full', 'Full'), ('flat', 'Flat'), ('scoop', 'Scoop')]:
+            tk.Radiobutton(muff_row, text=txt, variable=self.muff_tone_var, value=val, bg=PANEL, fg=FG,
+                           selectcolor='#2a3540', activebackground=PANEL, font=(FF, 9), pady=0,
+                           command=lambda: setattr(self.amp.pedals, 'muff_tone', self.muff_tone_var.get())
+                           ).pack(side='left', padx=3)
+        c = self._pcard(pg, 'Level')
+        _sl(c, 'Drive', 1.0, 10.0, p.fuzz_drive, lambda v: setattr(self.amp.pedals, 'fuzz_drive', v), attr='fuzz_drive')
+        _sl(c, 'Volume', 0.1, 1.0, p.fuzz_vol, lambda v: setattr(self.amp.pedals, 'fuzz_vol', v),
             fmt=lambda v: f'{int(v*100)}%', attr='fuzz_vol')
 
-        # Big Muff tone toggle
-        muff_row = tk.Frame(fuzz_sec, bg=PANEL); muff_row.pack(fill='x', padx=10, pady=3)
-        tk.Label(muff_row, text='Big Muff Tone', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
-        self.muff_tone_var = tk.StringVar(value=p.muff_tone)
-        for val, txt, tip in [
-            ('full',  'Full',  'Tone wide open — bright, cutting'),
-            ('flat',  'Flat',  'Tone centred — even response'),
-            ('scoop', 'Scoop', 'Mid scoop — massive wall-of-sound'),
-        ]:
-            fr = tk.Frame(muff_row, bg=PANEL); fr.pack(side='left', padx=4)
-            tk.Radiobutton(fr, text=txt, variable=self.muff_tone_var, value=val,
-                           bg=PANEL, fg=FG, selectcolor='#2a3540', activebackground=PANEL,
-                           command=lambda: setattr(self.amp.pedals, 'muff_tone',
-                                                   self.muff_tone_var.get())
-                           ).pack(anchor='w')
-            tk.Label(fr, text=tip, bg=PANEL, fg=DIM, font=(FF,8)).pack(anchor='w')
-
-        # ── Distortion ─────────────────────────────────────────
-        dist_sec = self._sec(inner, PEDAL_SECTION_TITLES['dist'],
-                             group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['dist'] = dist_sec.master
-        self._fx_reorder_row(dist_sec, 'dist')
-        self._build_pedal_preset_row(dist_sec, 'dist')
-        _, self.dist_var = on_off(dist_sec, 'dist_on', 'Distortion  Enabled')
-        _radio_row(dist_sec, 'Type',
-                   [('ds1','Boss DS-1'),('rat','ProCo RAT'),
-                    ('dist_plus','MXR Dist+'),('metal','Metal')],
+        # ── Distortion ───────────────────────────────────────
+        pg = self._pedal_page('dist')
+        self.dist_var = _head(pg, 'dist', 'Enabled')
+        c = self._pcard(pg, 'Type')
+        _radio_row(c, '', [('ds1', 'DS-1'), ('rat', 'RAT'), ('dist_plus', 'Dist+'), ('metal', 'Metal')],
                    'dist_mode', p.dist_mode)
-        _sl(dist_sec, 'Drive', 1.0, 10.0, p.dist_drive,
-            lambda v: setattr(self.amp.pedals, 'dist_drive', v), attr='dist_drive')
-        _sl(dist_sec, 'Tone', 0.0, 1.0, p.dist_tone,
-            lambda v: setattr(self.amp.pedals, 'dist_tone', v),
+        c = self._pcard(pg, 'Level')
+        _sl(c, 'Drive', 1.0, 10.0, p.dist_drive, lambda v: setattr(self.amp.pedals, 'dist_drive', v), attr='dist_drive')
+        _sl(c, 'Tone', 0.0, 1.0, p.dist_tone, lambda v: setattr(self.amp.pedals, 'dist_tone', v),
             fmt=lambda v: f'{int(v*100)}%', attr='dist_tone')
-        _sl(dist_sec, 'Volume', 0.1, 1.0, p.dist_vol,
-            lambda v: setattr(self.amp.pedals, 'dist_vol', v),
+        _sl(c, 'Volume', 0.1, 1.0, p.dist_vol, lambda v: setattr(self.amp.pedals, 'dist_vol', v),
             fmt=lambda v: f'{int(v*100)}%', attr='dist_vol')
 
-        # ── Overdrive / Boost ─────────────────────────────────
-        od_sec = self._sec(inner, PEDAL_SECTION_TITLES['od'],
-                           group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['od'] = od_sec.master
-        self._fx_reorder_row(od_sec, 'od')
-        self._build_pedal_preset_row(od_sec, 'od')
-        _, self.od_var = on_off(od_sec, 'od_on', 'OD / Boost  Enabled')
-        _radio_row(od_sec, 'Type',
-                   [('tubescreamer','Tubescreamer'),('klon','Klon (transparent)'),
-                    ('boost','Clean Boost')],
+        # ── Overdrive / Boost ────────────────────────────────
+        pg = self._pedal_page('od')
+        self.od_var = _head(pg, 'od', 'Enabled')
+        c = self._pcard(pg, 'Type')
+        _radio_row(c, '', [('tubescreamer', 'Tubescreamer'), ('klon', 'Klon'), ('bd2', 'Blues Driver'), ('boost', 'Boost')],
                    'od_mode', p.od_mode)
-        _sl(od_sec, 'Drive', 1.0, 10.0, p.od_drive,
-            lambda v: setattr(self.amp.pedals, 'od_drive', v), attr='od_drive')
-        _sl(od_sec, 'Volume', 0.1, 1.0, p.od_vol,
-            lambda v: setattr(self.amp.pedals, 'od_vol', v),
+        c = self._pcard(pg, 'Level')
+        _sl(c, 'Drive', 1.0, 10.0, p.od_drive, lambda v: setattr(self.amp.pedals, 'od_drive', v), attr='od_drive')
+        _sl(c, 'Volume', 0.1, 1.0, p.od_vol, lambda v: setattr(self.amp.pedals, 'od_vol', v),
             fmt=lambda v: f'{int(v*100)}%', attr='od_vol')
 
-        # ── Chorus / Flanger ─────────────────────────────────
-        ch_sec = self._sec(inner, PEDAL_SECTION_TITLES['chorus'],
-                           group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['chorus'] = ch_sec.master
-        self._fx_reorder_row(ch_sec, 'chorus')
-        self._build_pedal_preset_row(ch_sec, 'chorus')
-        _, self.ch_var = on_off(ch_sec, 'chorus_on', 'Chorus / Flanger  Enabled')
-        _radio_row(ch_sec, 'Type',
-                   [('chorus','Chorus'),('flanger','Flanger')],
+        # ── Phaser ───────────────────────────────────────────
+        pg = self._pedal_page('phaser')
+        self.phaser_var = _head(pg, 'phaser', 'Enabled')
+        c = self._pcard(pg, 'Sweep')
+        _sl(c, 'Rate (Hz)', 0.05, 5.0, p.phaser_rate, lambda v: setattr(self.amp.pedals, 'phaser_rate', v),
+            fmt=lambda v: f'{v:.2f} Hz', attr='phaser_rate')
+        _sl(c, 'Depth', 0.0, 1.0, p.phaser_depth, lambda v: setattr(self.amp.pedals, 'phaser_depth', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='phaser_depth')
+        _sl(c, 'Feedback', 0.0, 0.9, p.phaser_feedback, lambda v: setattr(self.amp.pedals, 'phaser_feedback', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='phaser_feedback')
+        _note(c, 'Four-stage phaser, 50/50 with the dry signal. Feedback sharpens the notches.')
+
+        # ── Chorus / Flanger / Vibrato / Doubler ─────────────
+        pg = self._pedal_page('chorus')
+        self.ch_var = _head(pg, 'chorus', 'Enabled')
+        c = self._pcard(pg, 'Type')
+        _radio_row(c, '', [('chorus', 'Chorus'), ('flanger', 'Flanger'), ('vibrato', 'Vibrato'), ('doubler', 'Doubler')],
                    'chorus_mode', p.chorus_mode)
-        _sl(ch_sec, 'Rate (Hz)', 0.1, 5.0, p.chorus_rate,
-            lambda v: setattr(self.amp.pedals, 'chorus_rate', v),
+        c = self._pcard(pg, 'Sound')
+        _sl(c, 'Rate (Hz)', 0.1, 5.0, p.chorus_rate, lambda v: setattr(self.amp.pedals, 'chorus_rate', v),
             fmt=lambda v: f'{v:.2f} Hz', attr='chorus_rate')
-        _sl(ch_sec, 'Depth', 0.0, 1.0, p.chorus_depth,
-            lambda v: setattr(self.amp.pedals, 'chorus_depth', v),
+        _sl(c, 'Depth', 0.0, 1.0, p.chorus_depth, lambda v: setattr(self.amp.pedals, 'chorus_depth', v),
             fmt=lambda v: f'{int(v*100)}%', attr='chorus_depth')
-        _sl(ch_sec, 'Mix', 0.0, 1.0, p.chorus_mix,
-            lambda v: setattr(self.amp.pedals, 'chorus_mix', v),
+        _sl(c, 'Mix', 0.0, 1.0, p.chorus_mix, lambda v: setattr(self.amp.pedals, 'chorus_mix', v),
             fmt=lambda v: f'{int(v*100)}%', attr='chorus_mix')
+        _note(c, 'Vibrato is always fully wet (Mix has no effect). Doubler: Depth sets the delay (10-25 ms), Rate the slow drift.')
 
-        # ── Delay ─────────────────────────────────────────────
-        dly_sec = self._sec(inner, PEDAL_SECTION_TITLES['delay'],
-                            group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['delay'] = dly_sec.master
-        self._fx_reorder_row(dly_sec, 'delay')
-        self._build_pedal_preset_row(dly_sec, 'delay')
-        _, self.dly_var = on_off(dly_sec, 'delay_on', 'Delay  Enabled')
-        _radio_row(dly_sec, 'Mode', [('tape','Tape'),('digital','Digital')],
-                   'delay_mode', p.delay_mode)
+        # ── Tremolo ──────────────────────────────────────────
+        pg = self._pedal_page('tremolo')
+        self.trem_var = _head(pg, 'tremolo', 'Enabled')
+        c = self._pcard(pg, 'Tremolo')
+        _sl(c, 'Rate (Hz)', 0.5, 15.0, p.tremolo_rate, lambda v: setattr(self.amp.pedals, 'tremolo_rate', v),
+            fmt=lambda v: f'{v:.1f} Hz', attr='tremolo_rate')
+        _sl(c, 'Depth', 0.0, 1.0, p.tremolo_depth, lambda v: setattr(self.amp.pedals, 'tremolo_depth', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='tremolo_depth')
+        _sl(c, 'Shape', 0.0, 1.0, p.tremolo_shape, lambda v: setattr(self.amp.pedals, 'tremolo_shape', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='tremolo_shape')
+        _note(c, 'Shape: smooth to choppy.')
 
-        # BPM link controls
-        link_row = tk.Frame(dly_sec, bg=PANEL); link_row.pack(fill='x', padx=10, pady=3)
-        tk.Label(link_row, text='BPM Link', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
+        # ── Rotary speaker ───────────────────────────────────
+        pg = self._pedal_page('rotary')
+        self.rot_var = _head(pg, 'rotary', 'Enabled')
+        c = self._pcard(pg, 'Speed')
+        _radio_row(c, '', [('slow', 'Slow'), ('fast', 'Fast'), ('brake', 'Brake')], 'rotary_speed', p.rotary_speed)
+        _sl(c, 'Slow rate (Hz)', 0.2, 2.0, p.rotary_slow, lambda v: setattr(self.amp.pedals, 'rotary_slow', v),
+            fmt=lambda v: f'{v:.2f} Hz', attr='rotary_slow')
+        _sl(c, 'Fast rate (Hz)', 3.0, 10.0, p.rotary_fast, lambda v: setattr(self.amp.pedals, 'rotary_fast', v),
+            fmt=lambda v: f'{v:.1f} Hz', attr='rotary_fast')
+        c = self._pcard(pg, 'Sound')
+        _sl(c, 'Depth', 0.0, 1.0, p.rotary_depth, lambda v: setattr(self.amp.pedals, 'rotary_depth', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='rotary_depth')
+        _sl(c, 'Speed-up / down', 0.0, 1.0, p.rotary_ramp, lambda v: setattr(self.amp.pedals, 'rotary_ramp', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='rotary_ramp')
+        _sl(c, 'Level (dry-wet)', 0.0, 1.0, p.rotary_mix, lambda v: setattr(self.amp.pedals, 'rotary_mix', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='rotary_mix')
+        _note(c, "Like the Keeley Dark Side's rotary: pick Slow or Fast and the horn and drum coast to the new speed. Brake stops them.")
+
+        # ── Delay ────────────────────────────────────────────
+        pg = self._pedal_page('delay')
+        self.dly_var = _head(pg, 'delay', 'Enabled')
+        c = self._pcard(pg, 'Time')
+        _radio_row(c, 'Mode', [('tape', 'Tape'), ('digital', 'Digital')], 'delay_mode', p.delay_mode)
+        link_row = tk.Frame(c, bg=PANEL)
+        link_row.pack(fill='x', padx=8, pady=1)
         self.dly_link_var = tk.BooleanVar(value=p.delay_bpm_link)
+
         def _tog_link():
             self.amp.pedals.delay_bpm_link = self.dly_link_var.get()
             self._dly_refresh_ui()
-        ttk.Checkbutton(link_row, text='Sync to metronome BPM',
-                        variable=self.dly_link_var, command=_tog_link
-                        ).pack(side='left', padx=6)
-
-        # note value (visible when linked)
-        self.dly_note_frame = tk.Frame(dly_sec, bg=PANEL)
-        self.dly_note_frame.pack(fill='x', padx=10, pady=2)
-        tk.Label(self.dly_note_frame, text='Note value', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
+        ttk.Checkbutton(link_row, text='Sync to metronome BPM', variable=self.dly_link_var, command=_tog_link
+                        ).pack(side='left')
+        self.dly_note_frame = tk.Frame(c, bg=PANEL)
+        self.dly_note_frame.pack(fill='x', padx=8, pady=1)
         self.dly_note_var = tk.StringVar(value=p.delay_note)
-        for val, txt in [('dotted8','Dotted 8th'),('quarter','Quarter'),('half','Half')]:
-            tk.Radiobutton(self.dly_note_frame, text=txt, variable=self.dly_note_var,
-                           value=val, bg=PANEL, fg=FG, selectcolor='#2a3540',
-                           activebackground=PANEL,
-                           command=lambda: setattr(self.amp.pedals, 'delay_note',
-                                                   self.dly_note_var.get())
-                           ).pack(side='left', padx=6)
-        self.dly_note_ms = tk.Label(self.dly_note_frame, text='', bg=PANEL,
-                                     fg=DIM, font=(FF,9))
-        self.dly_note_ms.pack(side='left', padx=8)
-
-        # manual time slider (visible when not linked)
-        self.dly_time_frame = tk.Frame(dly_sec, bg=PANEL)
-        self.dly_time_frame.pack(fill='x', padx=10, pady=2)
-        tk.Label(self.dly_time_frame, text='Time (ms)', bg=PANEL, fg=FG,
-                 font=(FF,10), width=18, anchor='w').pack(side='left')
+        for val, txt in [('dotted8', 'Dotted 8th'), ('quarter', 'Quarter'), ('half', 'Half')]:
+            tk.Radiobutton(self.dly_note_frame, text=txt, variable=self.dly_note_var, value=val, bg=PANEL, fg=FG,
+                           selectcolor='#2a3540', activebackground=PANEL, font=(FF, 9), pady=0,
+                           command=lambda: setattr(self.amp.pedals, 'delay_note', self.dly_note_var.get())
+                           ).pack(side='left', padx=3)
+        self.dly_note_ms = tk.Label(self.dly_note_frame, text='', bg=PANEL, fg=DIM, font=(FF, 8))
+        self.dly_note_ms.pack(side='left', padx=4)
+        self.dly_time_frame = tk.Frame(c, bg=PANEL)
+        self.dly_time_frame.pack(fill='x', padx=8, pady=1)
+        tk.Label(self.dly_time_frame, text='Time (ms)', bg=PANEL, fg=FG, font=(FF, 9), width=15, anchor='w').pack(side='left')
         self.dly_time_var = tk.StringVar(value=f'{int(p.delay_time*1000)} ms')
+
         def _dly_time_cb(v):
             self.amp.pedals.delay_time = float(v) / 1000.0
             self.dly_time_var.set(f'{int(float(v))} ms')
-        self.dly_time_sl = self._scale(self.dly_time_frame, 10, 2000,
-                                        _dly_time_cb, p.delay_time*1000, length=220)
-        self.dly_time_sl.pack(side='left', padx=6)
-        tk.Label(self.dly_time_frame, textvariable=self.dly_time_var,
-                 bg=PANEL, fg=DIM, font=(FF,10), width=8).pack(side='left')
-
-        _sl(dly_sec, 'Feedback', 0.0, 0.95, p.delay_feedback,
-            lambda v: setattr(self.amp.pedals, 'delay_feedback', v),
+        self.dly_time_sl = self._scale(self.dly_time_frame, 10, 2000, _dly_time_cb, p.delay_time * 1000, length=70)
+        self.dly_time_sl.pack(side='left', padx=4, fill='x', expand=True)
+        tk.Label(self.dly_time_frame, textvariable=self.dly_time_var, bg=PANEL, fg=DIM, font=(FF, 9), width=7,
+                 anchor='w').pack(side='left')
+        c = self._pcard(pg, 'Repeats')
+        _sl(c, 'Feedback', 0.0, 0.95, p.delay_feedback, lambda v: setattr(self.amp.pedals, 'delay_feedback', v),
             fmt=lambda v: f'{int(v*100)}%', attr='delay_feedback')
-        _sl(dly_sec, 'Mix', 0.0, 1.0, p.delay_mix,
-            lambda v: setattr(self.amp.pedals, 'delay_mix', v),
+        _sl(c, 'Mix', 0.0, 1.0, p.delay_mix, lambda v: setattr(self.amp.pedals, 'delay_mix', v),
             fmt=lambda v: f'{int(v*100)}%', attr='delay_mix')
-
         self._dly_refresh_ui()
 
         # ── Reverb ───────────────────────────────────────────
-        rev_sec = self._sec(inner, PEDAL_SECTION_TITLES['reverb'],
-                            group=PEDALS_ACCORDION_GROUP, default_collapsed=True)
-        self._fx_outer['reverb'] = rev_sec.master
-        self._fx_reorder_row(rev_sec, 'reverb')
-        self._build_pedal_preset_row(rev_sec, 'reverb')
-        _, self.rev_var = on_off(rev_sec, 'reverb_on', 'Reverb  Enabled')
-        _sl(rev_sec, 'Size', 0.1, 1.0, p.reverb_size,
-            lambda v: setattr(self.amp.pedals, 'reverb_size', v),
+        pg = self._pedal_page('reverb')
+        self._rev_page = pg
+        self.rev_var = _head(pg, 'reverb', 'Enabled')
+        c = self._pcard(pg, 'Type')
+        self.rev_type_var = _radio_row(c, '', [('room', 'Room'), ('plate', 'Plate'), ('spring', 'Spring'), ('cloud', 'Cloud')],
+                                       'reverb_type', p.reverb_type)
+        _sl(c, 'Size', 0.1, 1.0, p.reverb_size, lambda v: setattr(self.amp.pedals, 'reverb_size', v),
             fmt=lambda v: f'{int(v*100)}%', attr='reverb_size')
-        _sl(rev_sec, 'Mix', 0.0, 1.0, p.reverb_mix,
-            lambda v: setattr(self.amp.pedals, 'reverb_mix', v),
+        _sl(c, 'Mix', 0.0, 1.0, p.reverb_mix, lambda v: setattr(self.amp.pedals, 'reverb_mix', v),
             fmt=lambda v: f'{int(v*100)}%', attr='reverb_mix')
+        # Decay and Damping only mean something for Plate / Spring / Cloud (the Room reverb has a fixed decay)
+        self.rev_extra_frame = self._pcard(pg, 'Tail')
+        _sl(self.rev_extra_frame, 'Decay', 0.0, 1.0, p.reverb_decay, lambda v: setattr(self.amp.pedals, 'reverb_decay', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='reverb_decay')
+        _sl(self.rev_extra_frame, 'Damping', 0.0, 1.0, p.reverb_damp, lambda v: setattr(self.amp.pedals, 'reverb_damp', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='reverb_damp')
+        self.rev_type_var.trace_add('write', lambda *_a: self._rev_refresh_ui())
+        self._rev_refresh_ui()
 
-        # Start polling for the BPM-link ms display — guarded so rebuilding
-        # this tab (e.g. after a profile load) doesn't stack up a second
-        # concurrent polling loop on top of the first.
+        # Poll the BPM-link ms display; guarded so rebuilding the tab (after a profile load) doesn't stack loops.
         if not getattr(self, '_dly_bpm_poll_started', False):
             self._dly_bpm_poll_started = True
             self._poll_dly_bpm()
 
-        # apply the (default, or session-restored-later) chain order to the
-        # freshly-built section frames
+        # ── the board: mute, reset, chain, tray ──────────────
+        self._build_pedal_board(board_inner)
+        if not HAS_PIL and not self._insp_open:      # no board to click on: open every pedal as a tab
+            self._insp_open = list(self._pedal_pages)
+            self._insp_sel = self._insp_open[0]
+        self._insp_open = [c for c in self._insp_open if c in self._pedal_pages]
+        if self._insp_sel not in self._insp_open:
+            self._insp_sel = self._insp_open[-1] if self._insp_open else None
         self._relayout_pedals()
+        self._insp_sync(first=True)
 
     def _rebuild_pedals_ui(self):
-        """Tear down and rebuild the whole Pedals tab. _tab_pedals() reads
-        every control's default from the pedal's current live value, so
-        this is the simplest way to bring ~25 pedal controls in sync after
-        a profile load sets them all programmatically — cheaper than
-        threading a widget reference through every single slider/radio."""
+        """Tear down and rebuild the whole Pedals tab. _tab_pedals() reads every control's default from the pedal's
+        current live value, so this is the simplest way to bring ~35 pedal controls in sync after a profile load
+        sets them all programmatically. Which pedals are open in the inspector is kept."""
         for child in self._pedals_tab_root.winfo_children():
             child.destroy()
         self._tab_pedals(self._pedals_tab_root)
-        # The rebuilt tab makes fresh on/off variables whose initial values
-        # never fire the write-trace that normally refreshes the LPD8, so
-        # push the new state to the pads explicitly.
+        # The rebuilt tab makes fresh on/off variables whose initial values never fire the write-trace that
+        # normally refreshes the LPD8, so push the new state to the pads explicitly.
         self._lpd8_refresh_leds(force=True)
 
+    # ── the inspector panel ──────────────────────────────────
+
+    def _open_pedal(self, code):
+        """Show a pedal's controls in the inspector (the board's tiles are its tabs), opening the panel if needed."""
+        if code not in self._pedal_pages:
+            return
+        self._insp_open = [code]
+        self._insp_sel = code
+        self._insp_sync()
+
+    def _insp_close_tab(self, code):
+        if code in self._insp_open:
+            self._insp_open.remove(code)
+        if self._insp_sel == code:
+            self._insp_sel = self._insp_open[-1] if self._insp_open else None
+        self._insp_sync()
+
+    def _insp_close_all(self):
+        self._insp_open, self._insp_sel, self._insp_max = [], None, False
+        self._insp_sync()
+
+    def _insp_toggle_max(self):
+        self._insp_max = not self._insp_max
+        self._insp_sync()
+
+    _INSP_MIN_H = 150
+
+    def _insp_fit_later(self):
+        """Re-fit the split once the current round of layout has settled (cheap to call repeatedly)."""
+        if getattr(self, '_insp_fit_pending', False):
+            return
+        self._insp_fit_pending = True
+
+        def _run():
+            self._insp_fit_pending = False
+            self._insp_place_sash()
+        self.after_idle(_run)
+
+    def _insp_place_sash(self):
+        """Put the split right below the pedals, so the board takes only the height its tiles need and the inspector
+        gets everything else (and so rarely needs to scroll). If the window is too short for both, the inspector
+        keeps a minimum height and the board scrolls."""
+        paned = getattr(self, '_pedals_paned', None)
+        try:
+            if paned is None or len(paned.panes()) != 2:
+                return
+            paned.update_idletasks()
+            total = paned.winfo_height()
+            if total <= 1:
+                return
+            need = self._board_inner.winfo_reqheight() + 6
+            y = max(100, min(need, total - self._INSP_MIN_H))
+            if abs(paned.sash_coord(0)[1] - y) > 1:
+                paned.sash_place(0, 0, y)
+        except tk.TclError:
+            pass
+
+    def _insp_sync(self, first=False):
+        """Bring the inspector in line with self._insp_open / _insp_sel / _insp_max: show or hide the panel, redraw
+        its tab strip, and show the selected pedal's page."""
+        paned, insp, board = self._pedals_paned, self._insp, self._board_host
+        panes = [str(x) for x in paned.panes()]
+        if not self._insp_open:
+            if str(insp) in panes:
+                paned.forget(insp)
+            if str(board) not in [str(x) for x in paned.panes()]:
+                paned.add(board, stretch='always', minsize=120)
+            self._refresh_board_selection()
+            return
+        if self._insp_max:
+            if str(board) in panes:
+                paned.forget(board)
+        elif str(board) not in panes:
+            paned.add(board, before=insp, stretch='always', minsize=120) if str(insp) in panes \
+                else paned.add(board, stretch='always', minsize=120)
+        if str(insp) not in [str(x) for x in paned.panes()]:
+            paned.add(insp, stretch='never', minsize=self._INSP_MIN_H)
+            self.after_idle(self._insp_place_sash)
+        elif not self._insp_max and len(paned.panes()) == 2 and (first or str(board) not in panes):
+            self.after_idle(self._insp_place_sash)
+        self._insp_max_btn.configure(text=('Restore' if self._insp_max else 'Maximize'))
+        # the title: which pedal this is (the board's tiles are the tabs)
+        if self._insp_sel in PEDAL_ICON_SPECS:
+            self._insp_swatch.delete('all')
+            self._insp_swatch.create_rectangle(0, 0, 9, 9, fill=PEDAL_ICON_SPECS[self._insp_sel][1], outline='')
+            self._insp_title.configure(text=PEDAL_SECTION_TITLES.get(self._insp_sel, self._insp_sel))
+        # the page
+        for page in self._pedal_pages.values():
+            page.pack_forget()
+        sel = self._pedal_pages.get(self._insp_sel)
+        if sel is not None:
+            sel.pack(fill='x')
+            self._insp_body.update_idletasks()
+            self._insp_body.master.configure(scrollregion=self._insp_body.master.bbox('all'))
+            if getattr(self, '_insp_shown', None) != self._insp_sel:
+                self._insp_body.master.yview_moveto(0)
+            self._insp_shown = self._insp_sel
+        self._refresh_board_selection()
+
+    # ── order, position, on/off ──────────────────────────────
+
+    def _build_pedal_preset_row(self, parent, code):
+        """Save / Load for one pedal's own settings, packed on the left of the page header."""
+        row = tk.Frame(parent, bg=BG)
+        row.pack(side='left')
+        self._mini_btn(row, 'Save…', lambda c=code: self._save_pedal_preset(c)).pack(side='left')
+        self._mini_btn(row, 'Load…', lambda c=code: self._load_pedal_preset(c)).pack(side='left', padx=3)
+        name = self._pedal_preset_name.get(code)
+        lbl = tk.Label(row, text=(f'Preset: {name}' if name else ''), bg=BG, fg=(FG if name else DIM), font=(FF, 9))
+        lbl.pack(side='left', padx=6)
+        self._pedal_preset_labels = getattr(self, '_pedal_preset_labels', {})
+        self._pedal_preset_labels[code] = lbl
+
     def _fx_reorder_row(self, parent, name):
-        """Move up/down control at the top of a reorderable pedal section.
-        _relayout_pedals() keeps the position label and the disabled ends
-        of the chain in sync whenever the order changes."""
-        row = tk.Frame(parent, bg=PANEL); row.pack(fill='x', padx=10, pady=(6,0))
+        """Position in the chain, on the right of a pedal's page header: earlier / later, and which side of the amp.
+        _relayout_pedals() keeps the label and the buttons in sync whenever the order changes."""
+        row = tk.Frame(parent, bg=BG)
+        row.pack(side='right')
         pos_var = tk.StringVar(value='')
-        tk.Label(row, textvariable=pos_var, bg=PANEL, fg=DIM, font=(FF,9)).pack(side='left')
-        up = ttk.Button(row, text='▲ Move up', width=11,
-                         command=lambda: self._move_fx(name, -1))
-        up.pack(side='right', padx=(4,0))
-        down = ttk.Button(row, text='▼ Move down', width=13,
-                           command=lambda: self._move_fx(name, 1))
-        down.pack(side='right', padx=(4,0))
-        side = ttk.Button(row, text='', width=16,
-                           command=lambda: self._toggle_fx_side(name))
-        side.pack(side='right', padx=(4,0))
+        tk.Label(row, textvariable=pos_var, bg=BG, fg=DIM, font=(FF, 9)).pack(side='left', padx=(0, 6))
+        side = self._mini_btn(row, '', lambda: self._toggle_fx_side(name))
+        side.pack(side='left', padx=2)
+        up = self._mini_btn(row, '◄ Earlier', lambda: self._move_fx(name, -1))
+        up.pack(side='left', padx=2)
+        down = self._mini_btn(row, 'Later ►', lambda: self._move_fx(name, 1))
+        down.pack(side='left', padx=2)
         self._fx_rows[name] = dict(pos_var=pos_var, up=up, down=down, side=side)
 
     def _reset_pedal_order(self):
         self.amp.pedals.order = list(DEFAULT_PEDAL_ORDER)
         self._relayout_pedals()
 
-    def _move_fx(self, name, delta):
-        """Swap a pedal with its neighbour in the chain. The 'amp' marker is
-        part of the same list, so moving a pedal past it moves that pedal
-        from before the amp to after it (or back)."""
+    def _pedal_is_on(self, code):
+        if code == AMP_MARKER:
+            return True
+        var = getattr(self, '_pedal_on_vars', {}).get(code)
+        return bool(var.get()) if var is not None else bool(getattr(self.amp.pedals, code + '_on', False))
+
+    def _set_pedal_on(self, code, value):
+        var = self._pedal_on_vars.get(code)
+        if var is not None:
+            var.set(value)
+        setattr(self.amp.pedals, code + '_on', value)
+
+    def _move_target(self, name, delta):
+        """The order-list index of the pedal (or the amp) that `name` would hop over to go one step earlier (-1) or
+        later (+1) in the chain you can see: switched-off pedals aren't in it, so they are skipped. None at the end."""
         order = self.amp.pedals.order
         i = order.index(name)
         j = i + delta
-        if not (0 <= j < len(order)):
+        while 0 <= j < len(order):
+            if not self._pedal_is_on(name) or order[j] == AMP_MARKER or self._pedal_is_on(order[j]):
+                return j
+            j += delta
+        return None
+
+    def _move_fx(self, name, delta):
+        """One step earlier / later in the chain. The 'amp' marker is part of the same list, so moving a pedal past
+        it moves that pedal from before the amp to after it (or back)."""
+        order = self.amp.pedals.order
+        j = self._move_target(name, delta)
+        if j is None:
             return
-        order[i], order[j] = order[j], order[i]
+        target = order[j]
+        order.remove(name)
+        k = order.index(target)
+        order.insert(k + 1 if delta > 0 else k, name)
         self._relayout_pedals()
 
     def _toggle_fx_side(self, name):
-        """Send a pedal to the other side of the amp, placing it right next
-        to the amp marker (nearest where it just was)."""
+        """Send a pedal to the other side of the amp, placing it right next to the amp marker."""
         order = self.amp.pedals.order
         was_post = order.index(name) > order.index(AMP_MARKER)
         order.remove(name)
@@ -6856,89 +7773,77 @@ class App(tk.Tk):
         self._relayout_pedals()
 
     def _relayout_pedals(self):
-        """Re-pack the reorderable pedal sections to match amp.pedals.order
-        (mute is pinned above all of them, so it's untouched here), and
-        refresh each section's position label and Move up/down buttons.
-        The order also holds the 'amp' marker: it has no section of its
-        own, but it splits the pedals into pre-amp and post-amp, which each
-        section's label, its side button and the status strip all show."""
+        """Refresh everything that depends on the chain order: each page's position label and buttons, each board
+        tile's PRE / POST tag, and the board layout. The order also holds the 'amp' marker, which splits the pedals
+        into pre-amp and post-amp."""
         order = self.amp.pedals.order
         amp_i = order.index(AMP_MARKER) if AMP_MARKER in order else len(order)
-        pedals = [n for n in order if n != AMP_MARKER]
-        for name in pedals:
-            self._fx_outer[name].pack_forget()
-        for name in pedals:
-            self._fx_outer[name].pack(fill='x', padx=8, pady=6)
-        n = len(order)
         for idx, name in enumerate(order):
             if name == AMP_MARKER:
                 continue
             post = idx > amp_i
-            side_list = order[amp_i + 1:] if post else order[:amp_i]
-            row = self._fx_rows[name]
-            row['pos_var'].set(
-                f"{'Post-amp' if post else 'Pre-amp'} · "
-                f"{side_list.index(name) + 1} of {len(side_list)}  "
-                f"({'after the amp, cab and EQ' if post else 'ahead of the amp'})")
-            row['side'].configure(text=('← Move pre-amp' if post else 'Move post-amp →'))
-            row['up'].configure(state=('disabled' if idx == 0 else 'normal'))
-            row['down'].configure(state=('disabled' if idx == n - 1 else 'normal'))
-        # The status-strip cells mirror the same order, top of the tab,
-        # amp marker included, each pedal tagged PRE or POST.
-        for name in order:
-            cell = self._pedal_icon_cells.get(name)
-            if cell is not None:
-                cell.pack_forget()
-        for idx, name in enumerate(order):
-            cell = self._pedal_icon_cells.get(name)
-            if cell is None:
-                continue
-            cell.pack(side='left', padx=6)
-            if name == AMP_MARKER:
-                continue
-            post = idx > amp_i
-            lbl = self._pedal_side_lbls.get(name)
-            if lbl is not None:
-                lbl.configure(text=('POST-AMP' if post else 'PRE-AMP'),
-                              fg=(ACCENT if post else DIM))
+            side_list = [n for n in (order[amp_i + 1:] if post else order[:amp_i]) if self._pedal_is_on(n)]
+            row = self._fx_rows.get(name)
+            if row is not None:
+                if self._pedal_is_on(name):
+                    row['pos_var'].set(f"{'Post' if post else 'Pre'}-amp · {side_list.index(name) + 1} of {len(side_list)}")
+                else:
+                    row['pos_var'].set(f"Off · {'post' if post else 'pre'}-amp")
+                row['side'].configure(text=('◄ Pre-amp' if post else 'Post-amp ►'))
+                row['up'].configure(state=('normal' if self._move_target(name, -1) is not None else 'disabled'))
+                row['down'].configure(state=('normal' if self._move_target(name, 1) is not None else 'disabled'))
+            tag = getattr(self, '_pedal_side_lbls', {}).get(name)
+            if tag is not None:
+                try:
+                    tag[0].itemconfigure(tag[1], text=('POST' if post else 'PRE'), fill=(ACCENT if post else DIM))
+                except tk.TclError:
+                    pass
+        self._layout_board()
 
-    # Clickable hit-box for the status-strip LED, in the icon canvas's own
-    # coordinates — a few px bigger than the drawn oval (w-16,4 to w-4,16)
-    # so it's actually easy to hit, not just the exact 12x12 drawn shape.
-    _PEDAL_LED_HITBOX = (lambda w: (w - 19, 1, w - 1, 19))(PEDAL_ICON_SIZE[0])
+    # ── the board ────────────────────────────────────────────
 
-    def _build_pedal_status_strip(self, parent):
-        """A row of small pedal icons at the top of the Pedals tab, one
-        per pedal in the current chain order, each with a small LED dot
-        showing on/off at a glance. Clicking most of an icon jumps the
-        tab's scroll position to that pedal's own section below
-        (expanding it first if it's currently collapsed) — a quick way
-        to get to a pedal's full controls without hunting through the
-        scrollable list. Clicking directly on the LED itself instead
-        toggles that pedal on/off right from the strip, without needing
-        to open its section first — same single click target doing two
-        things depending on exactly where on it you click, same idea as
-        a MIDI pad's tap-vs-hold already does elsewhere in this app.
-        Silently omitted if Pillow isn't installed, same as the
-        rounded-button skin."""
+    _BOARD_CELL_W = 88   # px each pedal tile takes on the board, padding included
+    _LED_STRIP_H = 15    # the strip above each icon that holds the LED and the PRE/POST tag: nothing else is drawn there
+
+    def _build_pedal_board(self, parent):
+        """The board: one stompbox tile per pedal. Switched-on pedals sit on the chain in signal order, with the AMP
+        block marking where the NAM amp, cab and EQ are; switched-off pedals wait in the tray below it. Click a
+        tile to open its controls in the inspector, click its red dot to switch it on or off, drag it to reorder it
+        or to move it between the chain and the tray. The LED lives in its own strip above the icon, so it never
+        covers the pedal's artwork or any control."""
         self._pedal_icon_cells = {}
         self._pedal_led_ids = {}
         self._pedal_side_lbls = {}
+        self._pedal_sum_lbls = {}
+        self._pedal_tile_parts = {}
+        self._board_layout_key = None
+        self._drag = None
+        # mute + reset + hint
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill='x', padx=8, pady=(8, 0))
+        self.mute_var = tk.BooleanVar(value=self.amp.pedals.mute)
+        tk.Checkbutton(top, text='MUTE  (silence the amp input to tune up)', variable=self.mute_var, bg=BG, fg=FG,
+                       selectcolor='#2a3540', activebackground=BG, font=(FF, 9, 'bold'),
+                       command=lambda: setattr(self.amp.pedals, 'mute', self.mute_var.get())).pack(side='left')
+        self._mini_btn(top, 'Reset order', self._reset_pedal_order).pack(side='right')
         if not HAS_PIL:
             return
-        sec = self._sec(parent, 'Pedal Status')
-        strip = tk.Frame(sec, bg=PANEL)
-        strip.pack(fill='x', padx=10, pady=8)
-        tk.Label(sec, text='Signal flows left → right. Pedals before AMP run into the amp; '
-                           'pedals after it run on the amp + cab + EQ output.',
-                 bg=PANEL, fg=DIM, font=(FF,9), anchor='w').pack(fill='x', padx=10, pady=(0,8))
-        x0, y0, x1, y1 = self._PEDAL_LED_HITBOX
+        strip = tk.Frame(parent, bg=PANEL)
+        strip.pack(fill='x', padx=8, pady=6)
+        self._board_frame = strip
+        strip.bind('<Configure>', lambda e: self._layout_board())
+        self._chain_hdr = tk.Label(strip, text='  Chain · signal flows left to right · click a pedal to open it, drag to move it',
+                                   bg='#1a2128', fg=ACCENT, font=(FF, 9, 'bold'), anchor='w')
+        self._tray_hdr = tk.Label(strip, text='  Inactive · drag a pedal onto the chain to switch it on',
+                                  bg='#1a2128', fg=ACCENT, font=(FF, 9, 'bold'), anchor='w')
+        self._tray_empty = tk.Label(strip, text='Every pedal is on the chain.', bg=PANEL, fg=DIM, font=(FF, 9))
+        self._board_marker = tk.Frame(strip, bg=ACCENT, width=3)
+        w, h = PEDAL_ICON_SIZE
         for code in self.amp.pedals.order:
-            w, h = PEDAL_ICON_SIZE
+            cell = tk.Frame(strip, bg=PANEL, highlightthickness=2, highlightbackground=PANEL)
             if code == AMP_MARKER:
-                # Not a pedal: a fixed block marking where the NAM amp, cab IR
-                # and EQ sit between the two groups. No LED, nothing to click.
-                cell = tk.Frame(strip, bg=PANEL)
+                # Not a pedal: a fixed block marking where the NAM amp, cab IR and EQ sit. No LED, nothing to open.
+                tk.Frame(cell, bg=PANEL, height=self._LED_STRIP_H).pack()
                 c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0)
                 c.pack()
                 c.create_rectangle(2, 2, w - 2, h - 2, fill='#151515', outline=ACCENT, width=2)
@@ -6946,69 +7851,236 @@ class App(tk.Tk):
                 c.create_oval(w // 2 - 5, 19, w // 2 + 5, 29, fill=ACCENT, outline='')
                 c.create_text(w // 2, h - 22, text='AMP', fill=ACCENT, font=(FF, 10, 'bold'))
                 c.create_text(w // 2, h - 9, text='CAB · EQ', fill=DIM, font=(FF, 7))
-                tk.Label(cell, text='NAM', bg=PANEL, fg=DIM, font=(FF, 7)).pack()
-                cell.pack(side='left', padx=6)
+                tk.Label(cell, text='NAM', bg=PANEL, fg=ACCENT, font=(FF, 8, 'bold')).pack()
                 self._pedal_icon_cells[code] = cell
                 continue
             photo = _get_pedal_icon_photo(code)
             if photo is None:
                 continue
-            cell = tk.Frame(strip, bg=PANEL)
-            c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0,
-                          cursor='hand2')
+            led_c = tk.Canvas(cell, width=w, height=self._LED_STRIP_H, bg=PANEL, highlightthickness=0, cursor='hand2')
+            led_c.pack()
+            tag = led_c.create_text(3, self._LED_STRIP_H // 2, text='', anchor='w', fill=DIM, font=(FF, 7))
+            led = led_c.create_oval(w - 16, 2, w - 4, self._LED_STRIP_H - 1, outline='#2c2c2c')
+            led_c.bind('<Button-1>', lambda e, c=code: self._toggle_pedal_on_from_strip(c))
+            c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0, cursor='hand2')
             c.pack()
-            c.create_image(0, 0, anchor='nw', image=photo)
-            led = c.create_oval(w - 16, 4, w - 4, 16, outline='#2c2c2c')
-            def _on_click(event, code=code):
-                if x0 <= event.x <= x1 and y0 <= event.y <= y1:
-                    self._toggle_pedal_on_from_strip(code)
-                else:
-                    self._jump_to_pedal_section(code)
-            c.bind('<Button-1>', _on_click)
-            side_lbl = tk.Label(cell, text='', bg=PANEL, fg=DIM, font=(FF, 7))
-            side_lbl.pack()
-            cell.pack(side='left', padx=6)
+            img = c.create_image(0, 0, anchor='nw', image=photo)
+            name_lbl = tk.Label(cell, text=PEDAL_BOARD_NAMES.get(code, code), bg=PANEL, fg=FG, font=(FF, 8, 'bold'))
+            name_lbl.pack()
+            sum_lbl = tk.Label(cell, text='', bg=PANEL, fg=DIM, font=(FF, 8))
+            sum_lbl.pack()
+            for wdg in (c, name_lbl, sum_lbl):
+                wdg.bind('<ButtonPress-1>', lambda e, cd=code: self._tile_press(cd, e))
+                wdg.bind('<B1-Motion>', lambda e, cd=code: self._tile_motion(cd, e))
+                wdg.bind('<ButtonRelease-1>', lambda e, cd=code: self._tile_release(cd, e))
             self._pedal_icon_cells[code] = cell
-            self._pedal_side_lbls[code] = side_lbl
-            self._pedal_led_ids[code] = (c, led)
+            self._pedal_side_lbls[code] = (led_c, tag)
+            self._pedal_sum_lbls[code] = sum_lbl
+            self._pedal_led_ids[code] = (led_c, led)
+            self._pedal_tile_parts[code] = (c, img, name_lbl)
         self._refresh_all_pedal_leds()
+        self._refresh_board_summaries()
+        self._refresh_board_selection()
+        if not getattr(self, '_board_poll_started', False):
+            self._board_poll_started = True
+            self._poll_board()
+
+    def _layout_board(self):
+        """Place the tiles: the chain (switched-on pedals and the AMP, in signal order) on a wrapping grid, then the
+        tray of switched-off pedals. Cheap to call repeatedly: it only re-grids when the number of columns, the order
+        or the on/off states have changed."""
+        frame = getattr(self, '_board_frame', None)
+        cells = getattr(self, '_pedal_icon_cells', {})
+        if frame is None or not cells:
+            return
+        try:
+            cols = max(1, frame.winfo_width() // self._BOARD_CELL_W)
+        except tk.TclError:
+            return
+        order = [n for n in self.amp.pedals.order if n in cells]
+        chain = [n for n in order if self._pedal_is_on(n)]
+        tray = [n for n in order if not self._pedal_is_on(n)]
+        key = (cols, tuple(chain), tuple(tray))
+        if key == getattr(self, '_board_layout_key', None):
+            return
+        self._board_layout_key = key
+        for cell in cells.values():
+            cell.grid_forget()
+        for w in (self._chain_hdr, self._tray_hdr, self._tray_empty):
+            w.grid_forget()
+        r = 0
+        self._chain_hdr.grid(row=r, column=0, columnspan=cols, sticky='ew', padx=2, pady=(2, 3))
+        r += 1
+        for i, name in enumerate(chain):
+            cells[name].grid(row=r + i // cols, column=i % cols, padx=3, pady=3, sticky='n')
+        r += (len(chain) + cols - 1) // cols
+        self._tray_hdr.grid(row=r, column=0, columnspan=cols, sticky='ew', padx=2, pady=(8, 3))
+        r += 1
+        if tray:
+            for i, name in enumerate(tray):
+                cells[name].grid(row=r + i // cols, column=i % cols, padx=3, pady=3, sticky='n')
+        else:
+            self._tray_empty.grid(row=r, column=0, columnspan=cols, sticky='w', padx=6, pady=8)
+        self._insp_fit_later()
+
+    # ── dragging tiles ───────────────────────────────────────
+
+    def _tile_press(self, code, event):
+        self._drag = dict(code=code, x0=event.x_root, y0=event.y_root, active=False, ghost=None)
+
+    def _tile_motion(self, code, event):
+        d = self._drag
+        if not d or d['code'] != code:
+            return
+        if not d['active']:
+            if abs(event.x_root - d['x0']) + abs(event.y_root - d['y0']) < 6:
+                return
+            d['active'] = True
+            self._drag_start_ghost(d, code)
+        d['ghost'].geometry(f'+{event.x_root + 12}+{event.y_root + 8}')
+        self._drag_show_target(code, self._drop_target(code, event))
+
+    def _tile_release(self, code, event):
+        d, self._drag = self._drag, None
+        if not d or d['code'] != code:
+            return
+        if not d['active']:
+            if self._insp_open and self._insp_sel == code:
+                self._insp_close_all()          # clicking the pedal that is showing closes the panel
+            else:
+                self._open_pedal(code)
+            return
+        target = self._drop_target(code, event)
+        self._drag_cleanup(d)
+        if target is not None:
+            self._drop_pedal(code, *target)
+
+    def _drag_start_ghost(self, d, code):
+        try:
+            g = tk.Toplevel(self)
+            g.overrideredirect(True)
+            g.attributes('-topmost', True)
+            try:
+                g.attributes('-alpha', 0.8)
+            except tk.TclError:
+                pass
+            photo = _get_pedal_icon_photo(code)
+            tk.Label(g, image=photo, bg=PANEL, bd=0).pack()
+            d['ghost'] = g
+        except tk.TclError:
+            d['ghost'] = None
+        if d['ghost'] is None:
+            d['active'] = False
+
+    def _drag_cleanup(self, d):
+        g = d.get('ghost')
+        if g is not None:
+            try:
+                g.destroy()
+            except tk.TclError:
+                pass
+        try:
+            self._board_marker.place_forget()
+            self._tray_hdr.configure(bg='#1a2128', fg=ACCENT)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _drop_target(self, code, event):
+        """('chain', index among the other chain tiles) or ('tray', None) for the pointer's position, or None outside."""
+        strip = self._board_frame
+        px, py = event.x_root - strip.winfo_rootx(), event.y_root - strip.winfo_rooty()
+        if not (0 <= px <= strip.winfo_width() and 0 <= py <= strip.winfo_height()):
+            return None
+        if py >= self._tray_hdr.winfo_y():
+            return ('tray', None)
+        i = 0
+        for name in self._chain_others(code):
+            cell = self._pedal_icon_cells[name]
+            if py > cell.winfo_y() + cell.winfo_height():
+                i += 1
+            elif px > cell.winfo_x() + cell.winfo_width() // 2:
+                i += 1
+        return ('chain', i)
+
+    def _chain_others(self, code):
+        return [n for n in self.amp.pedals.order if n != code and n in self._pedal_icon_cells and self._pedal_is_on(n)]
+
+    def _drag_show_target(self, code, target):
+        self._tray_hdr.configure(bg=(ACCENT if target and target[0] == 'tray' else '#1a2128'),
+                                 fg=(ACCENT_DARK if target and target[0] == 'tray' else ACCENT))
+        if not target or target[0] != 'chain':
+            self._board_marker.place_forget()
+            return
+        others = self._chain_others(code)
+        i = target[1]
+        if not others:
+            self._board_marker.place_forget()
+            return
+        if i < len(others):
+            cell = self._pedal_icon_cells[others[i]]
+            x = cell.winfo_x() - 4
+        else:
+            cell = self._pedal_icon_cells[others[-1]]
+            x = cell.winfo_x() + cell.winfo_width() + 1
+        self._board_marker.place(x=x, y=cell.winfo_y(), width=3, height=cell.winfo_height())
+        self._board_marker.lift()
+
+    def _drop_pedal(self, code, zone, idx):
+        """Apply a drop: onto the chain at position idx (switching the pedal on), or onto the tray (switching it off)."""
+        order = self.amp.pedals.order
+        if zone == 'chain':
+            others = self._chain_others(code)
+            idx = max(0, min(idx, len(others)))
+            order.remove(code)
+            if idx >= len(others):
+                order.insert(order.index(others[-1]) + 1, code)
+            else:
+                order.insert(order.index(others[idx]), code)
+            if not self._pedal_is_on(code):
+                self._set_pedal_on(code, True)
+        elif self._pedal_is_on(code):
+            self._set_pedal_on(code, False)
+        self._relayout_pedals()
+
+    # ── tile state ───────────────────────────────────────────
+
+    def _refresh_board_summaries(self):
+        p = self.amp.pedals
+        for code, lbl in list(getattr(self, '_pedal_sum_lbls', {}).items()):
+            try:
+                text = PEDAL_BOARD_SUMMARY(code, p)
+                if lbl.cget('text') != text:
+                    lbl.configure(text=text)
+            except tk.TclError:
+                pass
+
+    def _poll_board(self):
+        """Keep each tile's type/setting text current, whatever changed it (a slider, a MIDI knob, a mode-cycle pad,
+        a profile load)."""
+        self._refresh_board_summaries()
+        self.after(400, self._poll_board)
+
+    def _refresh_board_selection(self):
+        """Outline the tile of the pedal that is showing in the inspector."""
+        shown = self._insp_sel if getattr(self, '_insp_open', None) else None
+        for code, cell in getattr(self, '_pedal_icon_cells', {}).items():
+            if code == AMP_MARKER:
+                continue
+            try:
+                cell.configure(highlightbackground=(ACCENT if code == shown else PANEL))
+            except tk.TclError:
+                pass
+
+    def _on_section_toggled(self):
+        self._refresh_board_selection()
 
     def _toggle_pedal_on_from_strip(self, code):
-        """Flip a pedal's on/off state from its Pedal Status strip LED —
-        mirrors exactly what clicking its own Enabled checkbox does
-        (same BooleanVar, same amp.pedals attribute write), just from a
-        different widget, so MIDI/LED feedback, Tone Profile saving, and
-        everything else that watches the pedal's state can't tell the
-        difference."""
+        """Flip a pedal on or off from its board LED: the same variable and attribute write as its own Enabled
+        checkbox, so MIDI/LED feedback, Tone Profile saving and everything else that watches the pedal can't tell."""
         v = self._pedal_on_vars.get(code)
         if v is None:
             return
-        new_val = not v.get()
-        v.set(new_val)
-        setattr(self.amp.pedals, code + '_on', new_val)
-
-    def _jump_to_pedal_section(self, code):
-        """Scroll the Pedals tab so `code`'s own section is at the top of
-        the visible area, expanding it first if it's currently collapsed.
-        Position is computed from the section's actual on-screen offset
-        within the scrollable inner frame (winfo_y()), not a fixed index
-        times a guessed row height, so it stays correct regardless of
-        which sections above it are open/collapsed or how tall any of
-        them are."""
-        outer = self._fx_outer.get(code)
-        canvas = getattr(self, '_pedals_canvas', None)
-        if outer is None or canvas is None:
-            return
-        force_expand = getattr(outer, '_force_expand', None)
-        if force_expand is not None:
-            force_expand()
-        outer.update_idletasks()
-        inner = outer.master
-        total_h = inner.winfo_height()
-        if total_h <= 0:
-            return
-        frac = max(0.0, min(1.0, outer.winfo_y() / total_h))
-        canvas.yview_moveto(frac)
+        self._set_pedal_on(code, not v.get())
 
     def _update_pedal_led(self, code):
         entry = getattr(self, '_pedal_led_ids', {}).get(code)
@@ -7017,24 +8089,49 @@ class App(tk.Tk):
         canvas, led_id = entry
         var = getattr(self, '_pedal_on_vars', {}).get(code)
         on = bool(var.get()) if var is not None else bool(getattr(self.amp.pedals, code + '_on'))
-        # Deliberately RED rather than ACCENT — requested directly: a lit
-        # pedal should read as "hot" the same way regardless of whatever
-        # accent color is currently chosen in Appearance.
+        # Deliberately RED rather than ACCENT: a lit pedal should read as "hot" whatever accent colour is chosen.
         canvas.itemconfig(led_id, fill=(RED if on else '#3a3a3a'),
-                           outline=(_scale_color(RED, 0.4) if on else '#2c2c2c'))
+                          outline=(_scale_color(RED, 0.4) if on else '#2c2c2c'))
+        parts = getattr(self, '_pedal_tile_parts', {}).get(code)
+        if parts is not None:
+            c, img, name_lbl = parts
+            try:
+                c.itemconfigure(img, image=_get_pedal_icon_photo(code, dim=not on))
+                name_lbl.configure(fg=(FG if on else DIM))
+            except tk.TclError:
+                pass
+        self.after_idle(self._relayout_pedals)      # moves the tile between the chain and the tray
         self._lpd8_refresh_leds()
 
     def _refresh_all_pedal_leds(self):
         for code in list(getattr(self, '_pedal_led_ids', {}).keys()):
             self._update_pedal_led(code)
 
+    def _rotary_toggle_speed(self):
+        """MIDI / footswitch: Slow <-> Fast (from Brake it goes to Slow), and move the on-screen Speed radio with it."""
+        p = self.amp.pedals
+        new = 'fast' if p.rotary_speed == 'slow' else 'slow'
+        p.rotary_speed = new
+        self._pedal_widget_sync('rotary_speed', new)
+        return new
+
     def _wah_refresh_ui(self):
-        if self.wah_mode_var.get() == 'auto':
-            self.wah_manual_frame.pack_forget()
+        mode = self.wah_mode_var.get()
+        self.wah_manual_frame.pack_forget()
+        self.wah_auto_frame.pack_forget()
+        self.wah_env_frame.pack_forget()
+        if mode == 'auto':
             self.wah_auto_frame.pack(fill='x', padx=0, pady=0)
+        elif mode == 'envelope':
+            self.wah_env_frame.pack(fill='x', padx=0, pady=0)
         else:
-            self.wah_auto_frame.pack_forget()
             self.wah_manual_frame.pack(fill='x', padx=10, pady=2)
+
+    def _rev_refresh_ui(self):
+        """The Tail card (Decay / Damping) is for Plate, Spring and Cloud only."""
+        page = getattr(self, '_rev_page', None)
+        if page is not None:
+            page.flow.set_visible(self.rev_extra_frame, self.rev_type_var.get() != 'room')
 
     def _dly_refresh_ui(self):
         linked = self.dly_link_var.get()

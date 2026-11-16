@@ -22,3 +22,6 @@ __pycache__/
 /build/dist/
 /build/work/
 /build/spec/
+
+# Local-only bridge to the Tank-G (UltraRig licence is noncommercial; not part of the SoloTone repo)
+/tankg-bridge/

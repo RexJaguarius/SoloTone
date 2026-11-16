@@ -30,7 +30,10 @@ network access.
   6 kHz, ±15 dB each) laid out as vertical faders in a row, like a
   hardware graphic EQ pedal, plus a separate Level fader (±15 dB) for
   trimming overall output back to a usable level after a heavy cut/boost
-- Noise gate with fixed 3 ms attack / 60 ms release
+- **Noise gate** — Standard (fixed 3 ms attack / 60 ms release) or **Smart**: opens at the
+  threshold but only closes 6 dB lower, holds open for a set time, closes to a
+  chosen depth instead of always to silence, and a Hush control fades a dying note
+  into the noise rather than chopping it. Saved in Tone Profiles
 - **Hum Filter** — cascaded notch filters at the mains frequency and its
   next two harmonics (50/60 Hz), applied ahead of everything else
   including the tuner
@@ -70,21 +73,33 @@ network access.
   with a soft-knee gain curve, plus a Warmth control that blends in
   asymmetric tube-style saturation
 - Wah — Manual mode (position slider, or a keybind/MIDI Up-Down pair)
-  or Auto sweep mode (Rate + Intensity), both working within an adjustable
+  or Auto sweep mode (Rate + Intensity), or Envelope mode (the filter follows
+  how hard you play: Sensitivity, Decay, Wah / Band / Low-pass / High-pass,
+  sweep Up or Down), all working within an adjustable
   Range (Hz) instead of a fixed sweep band; the default range is
   guitar-voiced, with an in-app hint that bass typically wants it lower
   (e.g. 150–800 Hz)
-- Fuzz — Fuzz Face (asymmetric germanium-style clip) or Big Muff
+- Rotary speaker — a Leslie-style horn and drum that swirl at Slow or Fast (with the
+  rotors speeding up and slowing down between them) or stop on Brake; Depth, Level and
+  adjustable Slow/Fast rates, in the spirit of the Keeley Dark Side's rotary. A MIDI
+  trigger flips Slow/Fast
+- Fuzz — Fuzz Face (asymmetric germanium-style clip), Tone Bender (more gain,
+  tighter low end, mid hump) or Big Muff
   (cascaded hard clip with Full/Flat/Scoop tone voicings)
 - **Distortion** — 4 selectable voicings: Boss DS-1 (boxy, compressed hard
   clip), ProCo RAT, MXR Distortion+ (asymmetric diode clip), and Metal
   (cascaded clipping with a mid-scoop EQ)
 - Overdrive / Boost — Tubescreamer-style mid-hump drive, **Klon**
-  (transparent parallel clean + treble-lifted drive), or clean boost
-- Chorus / Flanger (rate, depth, mix)
+  (transparent parallel clean + treble-lifted drive), **Blues Driver** (open,
+  dynamic two-stage drive that keeps the lows), or clean boost
+- **Phaser** — four-stage allpass phaser (rate, depth, feedback)
+- Chorus / Flanger / **Vibrato** / **Doubler** (rate, depth, mix; vibrato is
+  always fully wet, the doubler is a short drifting delay)
+- **Tremolo** — rate, depth and a shape control from smooth sine to choppy
 - Delay — Tape or Digital voicing, manual time or BPM-linked to the
   metronome (dotted-8th / quarter / half note)
-- Schroeder Reverb (size, mix)
+- Reverb — **Room** (the original Schroeder reverb), **Plate**, **Spring** or
+  **Cloud** (size, decay, damping, mix; decay and damping apply to the last three)
 - Every effect has its own bypass, so pedals can be clicked in and out
   independently while playing
 - **Per-pedal mini-presets** — each pedal's own section has Save
@@ -98,28 +113,35 @@ network access.
   on each pedal let you restack the signal order (e.g. fuzz before wah vs.
   after); the order persists across sessions. The chain has an **AMP**
   marker for where the NAM amp, cab IR and EQ sit: pedals before it feed
-  the amp (compressor, wah, fuzz, distortion, overdrive), pedals after it
-  run on the amp's output (chorus, delay, reverb — so repeats and tails
+  the amp (compressor, wah, fuzz, distortion, overdrive, phaser), pedals after it
+  run on the amp's output (chorus, tremolo, delay, reverb — so repeats and tails
   aren't crushed by a distorted amp). Each pedal has a **Move post-amp /
   Move pre-amp** button. A **Reset to Default Order** button restores the
   factory sequence (Compressor → Wah → Fuzz → Distortion → Overdrive →
-  AMP → Chorus/Flanger → Delay → Reverb) in one click. Profiles saved
-  before this existed keep every pedal ahead of the amp, so they sound
-  exactly as they did
-- **One pedal's controls open at a time** — each pedal's section
-  expands/collapses like an accordion: opening one closes whichever
-  other was open, so the tab doesn't turn into a long scroll of every
-  pedal's controls at once. Compressor is open by default; which pedal
-  is open persists across sessions like everything else in Settings
-- **Pedal Status strip** — a row of small icons at the top of the tab,
-  one per pedal in the current chain order (with an AMP block marking where the amp sits, and each pedal tagged PRE-AMP or POST-AMP), each with an LED dot that
-  lights up **red** when that pedal is on (fixed, regardless of the
-  app's accent color — see Appearance). Click most of an icon to jump
-  straight to that pedal's own section below, expanding it if it was
-  closed; click directly on the LED itself instead to toggle that pedal
-  on/off right from the strip, without opening its section at all.
-  Requires the optional `Pillow` package (see Setup); the rest of
-  the app works the same without it, just without this strip
+  Phaser → AMP → Chorus → Tremolo → Delay → Reverb) in one click. Profiles
+  saved before the amp marker existed keep every pedal ahead of the amp, and
+  profiles saved before the phaser and tremolo get them added (off), so they
+  sound exactly as they did
+- **Inspector panel** — click a pedal on the board and its controls open in a panel
+  docked to the bottom of the tab, like an IDE's bottom panel. Each pedal you open
+  gets its own tab in the panel (with a close button); the panel is resizable (drag
+  its top edge), can be maximized, and scrolls inside itself, so the page never
+  becomes one long scroll. Controls are grouped into small cards that flow to fit
+  the width. Which pedals are open, which one is showing and the panel's height
+  persist across sessions. The header holds Enabled, Save/Load preset and the
+  pedal's position (Earlier / Later, Pre/Post-amp)
+- **Pedalboard** — small stompbox tiles at the top of the tab. The **chain** holds
+  the pedals that are switched on, in signal order, with the AMP block marking where
+  the amp, cab and EQ sit; the **inactive tray** below it holds the pedals that are
+  off, dimmed. Each tile shows the pedal's name, its current type or main setting
+  (e.g. Spring, Blues Driver, 5.0 Hz), PRE or POST amp, and an LED dot that lights
+  **red** when the pedal is on (fixed, regardless of the app's accent color). The
+  LED has its own strip above the icon, so it never covers anything. **Click** a
+  tile to open it in the inspector (it is outlined while shown); click the **LED**
+  to switch the pedal on or off; **drag** a tile to reorder it, onto the tray to
+  switch it off, or from the tray onto the chain to switch it on at that spot.
+  Requires the optional `Pillow` package (see Setup); without it every pedal opens
+  as a tab in the inspector instead
 
 **Tone Profiles** (Signal Chain tab)
 - **Save Profile… / Load Profile…** capture a whole recallable sound in
@@ -230,9 +252,8 @@ network access.
 **Settings**
 - **Sections are collapsible** — click any section's title bar (▼/▶) to
   collapse or expand it; each section remembers its state across
-  restarts. The Pedals tab's 8 effect sections are the one exception —
-  they behave as an accordion (see Pedals, above) instead of collapsing
-  independently
+  restarts. The Pedals tab has no collapsible sections: its pedals open in
+  the inspector panel (see Pedals, above)
 - **Keybinds** — maps any keyboard key to any of the same functions the
   MIDI Controller section below can map to a knob or pad, via the same
   generic "Learn" system (click Learn, then press a key). A knob-style
@@ -254,7 +275,7 @@ network access.
   Choosing either rebuilds the whole window immediately — whichever tab
   you're on stays selected — and both colors are saved with the rest of
   your settings. A **Reset to Default Theme** button restores the
-  factory colors in one click. The Pedal Status strip's on-LEDs are the
+  factory colors in one click. The Pedalboard's on-LEDs are the
   one exception — they're always red, not the chosen accent (see Pedals,
   above)
 - **MIDI Controller** — map any class-compliant USB-MIDI controller's
@@ -304,6 +325,17 @@ length/layers/mode, IR slot labels and active slot, block size, guitar
 tuning preset, selected pedal states, pedal chain order, keybind mappings,
 collapsed-section state, theme colors, and window settings, and the loaded NAM/IR file
 paths are all saved on close and restored on next launch.
+
+## Coming soon: M-VAVE Tank-G / UltraRig
+
+SoloTone has an optional **Tank-G tab** that sends your Tone Profiles to an
+M-VAVE Tank-G running the third-party
+[UltraRig](https://github.com/manuaguirre9/ultrarig) firmware, so a profile
+you built on the computer can be played on the pedal on its own. It maps
+each SoloTone pedal to the matching UltraRig block, fits the result to the
+pedal's CPU and memory, and loads it into a preset slot. The tab only shows
+up when a separate add-on folder is present, and that add-on is not part of
+this release. It is still in development and not available yet.
 
 ## Setup
 

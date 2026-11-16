@@ -182,9 +182,14 @@
         <tr><td>Fuzz</td><td class="num">0.17 ms</td><td class="num">0.35 ms</td><td><span class="bar" style="--w:2.8%"><i></i></span></td></tr>
         <tr><td>Distortion</td><td class="num">0.19 ms</td><td class="num">0.41 ms</td><td><span class="bar" style="--w:3.3%"><i></i></span></td></tr>
         <tr><td>Overdrive / boost</td><td class="num">0.39 ms</td><td class="num">0.63 ms</td><td><span class="bar" style="--w:6.7%"><i></i></span></td></tr>
-        <tr><td>Chorus / flanger</td><td class="num">0.20 ms</td><td class="num">0.37 ms</td><td><span class="bar" style="--w:3.4%"><i></i></span></td></tr>
+        <tr><td>Phaser</td><td class="num">0.11 ms</td><td class="num">0.18 ms</td><td><span class="bar" style="--w:1.8%"><i></i></span></td></tr>
+        <tr><td>Chorus / flanger / vibrato / doubler</td><td class="num">0.20 ms</td><td class="num">0.37 ms</td><td><span class="bar" style="--w:3.4%"><i></i></span></td></tr>
+        <tr><td>Tremolo</td><td class="num">0.01 ms</td><td class="num">0.02 ms</td><td><span class="bar" style="--w:0.3%"><i></i></span></td></tr>
         <tr><td>Delay</td><td class="num">0.27 ms</td><td class="num">0.42 ms</td><td><span class="bar" style="--w:4.6%"><i></i></span></td></tr>
-        <tr><td>Reverb</td><td class="num">0.65 ms</td><td class="num">1.12 ms</td><td><span class="bar" style="--w:11.2%"><i></i></span></td></tr>
+        <tr><td>Reverb, room</td><td class="num">0.65 ms</td><td class="num">1.12 ms</td><td><span class="bar" style="--w:11.2%"><i></i></span></td></tr>
+        <tr><td>Reverb, plate</td><td class="num">0.43 ms</td><td class="num">0.46 ms</td><td><span class="bar" style="--w:7.4%"><i></i></span></td></tr>
+        <tr><td>Reverb, spring</td><td class="num">0.19 ms</td><td class="num">0.36 ms</td><td><span class="bar" style="--w:3.2%"><i></i></span></td></tr>
+        <tr><td>Reverb, cloud</td><td class="num">0.30 ms</td><td class="num">0.51 ms</td><td><span class="bar" style="--w:5.1%"><i></i></span></td></tr>
       </tbody>
     </table></div>
     <p class="form-note" style="margin-top:12px; max-width:none">
@@ -244,17 +249,18 @@
     <div class="table-wrap"><table class="spec-table">
       <thead><tr><th>Block</th><th>Implementation</th></tr></thead>
       <tbody>
-        <tr><td>Noise gate</td><td>Block-RMS detector against a threshold; 3 ms attack and 60 ms release time constants, applied as a per-sample linear ramp across each block so block
-          edges don't click.</td></tr>
+        <tr><td>Noise gate</td><td>Standard: block-RMS detector against a threshold; 3 ms attack and 60 ms release time constants, applied as a per-sample linear ramp across each block so block
+          edges don't click. Smart: level read from an 8 ms power average in 64-sample steps, opens at the threshold and closes 6 dB below it, with hold, adjustable depth and release, and a Hush expander that fades a dying note into the noise. Block-size independent.</td></tr>
         <tr><td>Hum filter</td><td>Cascaded IIR notches (Q = 25) at the mains frequency (50 or 60 Hz) and its next two harmonics.</td></tr>
         <tr><td>Cab IR</td><td>Overlap-add FFT convolution, FFT length rounded up to the nearest 5-smooth size; the IR spectrum is cached per block size.</td></tr>
         <tr><td>EQ</td><td>Five biquads: low shelf 100 Hz (Q 0.707), peaking 400 Hz, 1 kHz and 2.5 kHz (Q 1.0), high shelf 6 kHz (Q 0.707); &plusmn;15 dB each, plus a &plusmn;15 dB level trim.</td></tr>
         <tr><td>Compressor</td><td>Soft-knee gain computer (6 dB knee), one-pole envelope follower, blendable tube-style saturation.</td></tr>
-        <tr><td>Fuzz &amp; distortion</td><td>Clip stages run 4&times; oversampled to suppress aliasing, with a DC blocker; Fuzz Face / Big Muff and DS-1 / RAT / Distortion+ / Metal voicings.</td></tr>
-        <tr><td>Wah</td><td>State-variable band-pass; manual position or auto-sweep.</td></tr>
-        <tr><td>Chorus / flanger, delay</td><td>LFO-modulated delay line; delay is tape (low-passed feedback) or digital, free-running or tempo-synced.</td></tr>
-        <tr><td>Reverb</td><td>Schroeder topology: four parallel comb filters into series all-passes.</td></tr>
-        <tr><td>Pedal chain</td><td>Eight effects around an AMP marker. Pre-amp pedals run ahead of the model; post-amp pedals run on the amp, cab and EQ output.</td></tr>
+        <tr><td>Fuzz &amp; distortion</td><td>Clip stages run 4&times; oversampled to suppress aliasing, with a DC blocker; Fuzz Face / Tone Bender / Big Muff and DS-1 / RAT / Distortion+ / Metal voicings.</td></tr>
+        <tr><td>Wah</td><td>State-variable filter; manual position, auto-sweep, or envelope mode (level-following wah / band / low-pass / high-pass, up or down).</td></tr>
+        <tr><td>Chorus / flanger / vibrato / doubler, delay</td><td>LFO-modulated delay line (vibrato is fully wet, the doubler a short delay with a slow drift); delay is tape (low-passed feedback) or digital, free-running or tempo-synced.</td></tr>
+        <tr><td>Phaser, tremolo</td><td>Phaser: four first-order all-passes swept by a per-sample sine LFO, with feedback, 50/50 with the dry signal. Tremolo: amplitude modulation from a sine blended toward a square-ish wave.</td></tr>
+        <tr><td>Reverb</td><td>Room: Schroeder topology, four parallel comb filters into series all-passes. Plate and Cloud: a Dattorro-style network (input diffusers into two cross-coupled damped tanks). Spring: three parallel springs, each a delay loop with a 24-section all-pass dispersion chain. Plate, Cloud and Spring run as vector operations and give identical output at any block size.</td></tr>
+        <tr><td>Pedal chain</td><td>Ten effects around an AMP marker. Pre-amp pedals run ahead of the model; post-amp pedals run on the amp, cab and EQ output.</td></tr>
         <tr><td>Looper</td><td>1&ndash;60 s loops, up to 10 layers, sample-count locked so layers cannot drift. Records the processed output; float32 buffers, 10.6 MB per layer at the longest length.</td></tr>
         <tr><td>Metronome</td><td>Scheduled inside the audio callback, so clicks are sample-accurate regardless of CPU load; 30&ndash;250 BPM.</td></tr>
         <tr><td>Tuner</td><td>McLeod normalized square-difference pitch detection with parabolic interpolation, on a 12,288-sample window (278 ms; 16,384 in Bass mode). Loudness-independent;
