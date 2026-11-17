@@ -258,9 +258,10 @@
         <tr><td>Fuzz &amp; distortion</td><td>Clip stages run 4&times; oversampled to suppress aliasing, with a DC blocker; Fuzz Face / Tone Bender / Big Muff and DS-1 / RAT / Distortion+ / Metal voicings.</td></tr>
         <tr><td>Wah</td><td>State-variable filter; manual position, auto-sweep, or envelope mode (level-following wah / band / low-pass / high-pass, up or down).</td></tr>
         <tr><td>Chorus / flanger / vibrato / doubler, delay</td><td>LFO-modulated delay line (vibrato is fully wet, the doubler a short delay with a slow drift); delay is tape (low-passed feedback) or digital, free-running or tempo-synced.</td></tr>
+        <tr><td>Pitch shifter</td><td>Delay-line shifter: two read taps sweep the line and cross-fade with sin&sup2; / cos&sup2; windows (46 ms grain), up to two voices from &minus;12 to +12 semitones plus cents. Within about 10 cents on guitar-like tones, about 3 ms of delay, identical output at any block size. Held chords pick up some roughness, as with any delay-line shifter.</td></tr>
         <tr><td>Phaser, tremolo</td><td>Phaser: four first-order all-passes swept by a per-sample sine LFO, with feedback, 50/50 with the dry signal. Tremolo: amplitude modulation from a sine blended toward a square-ish wave.</td></tr>
-        <tr><td>Reverb</td><td>Room: Schroeder topology, four parallel comb filters into series all-passes. Plate and Cloud: a Dattorro-style network (input diffusers into two cross-coupled damped tanks). Spring: three parallel springs, each a delay loop with a 24-section all-pass dispersion chain. Plate, Cloud and Spring run as vector operations and give identical output at any block size.</td></tr>
-        <tr><td>Pedal chain</td><td>Ten effects around an AMP marker. Pre-amp pedals run ahead of the model; post-amp pedals run on the amp, cab and EQ output.</td></tr>
+        <tr><td>Reverb</td><td>Room: Schroeder topology, four parallel comb filters into series all-passes. Plate and Cloud: a Dattorro-style network (input diffusers into two cross-coupled damped tanks). Spring: three parallel springs, each a delay loop with a 24-section all-pass dispersion chain. Shimmer: the Cloud network with an octave-up shifter in its feedback loop, held back 256 samples so it too is block-size independent. Plate, Cloud, Spring and Shimmer run as vector operations and give identical output at any block size.</td></tr>
+        <tr><td>Pedal chain</td><td>Twelve effects around an AMP marker. Pre-amp pedals run ahead of the model; post-amp pedals run on the amp, cab and EQ output.</td></tr>
         <tr><td>Looper</td><td>1&ndash;60 s loops, up to 10 layers, sample-count locked so layers cannot drift. Records the processed output; float32 buffers, 10.6 MB per layer at the longest length.</td></tr>
         <tr><td>Metronome</td><td>Scheduled inside the audio callback, so clicks are sample-accurate regardless of CPU load; 30&ndash;250 BPM.</td></tr>
         <tr><td>Tuner</td><td>McLeod normalized square-difference pitch detection with parabolic interpolation, on a 12,288-sample window (278 ms; 16,384 in Bass mode). Loudness-independent;
@@ -295,7 +296,7 @@
       <div class="trust-card"><span class="eyebrow">Whole-rig profiles</span>
         <p>A profile is plain JSON: model, IRs, every pedal parameter and order, EQ, gains, tuning, MIDI mappings for the pedals, and your notes on pickup and knob settings.</p></div>
       <div class="trust-card"><span class="eyebrow">Local, source-available</span>
-        <p>No network access, account or telemetry. Source-available under the PolyForm Shield License 1.0.0; it is not an OSI open-source license.</p></div>
+        <p>No account or telemetry, and no network use except the optional AI tone request you choose to send with your own API key. Source-available under the PolyForm Shield License 1.0.0; it is not an OSI open-source license.</p></div>
     </div>
   </section>
 

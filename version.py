@@ -6,9 +6,9 @@ Imported by solotone.py for display in the title bar and About dialog.
 """
 
 VERSION       = "1.0"           # Major.Minor — below 1.0 until first stable release
-BUILD         = 5               # Increments with every pushed change (reset to 1 at 1.0 RC1)
-BUILD_DATE    = "2026-11-04"
-STAGE         = "rc1"           # alpha | beta | rc1.. | release
+BUILD         = 6               # Increments with every pushed change (reset to 1 at 1.0 RC1)
+BUILD_DATE    = "2026-11-17"
+STAGE         = "rc2"           # alpha | beta | rc1.. | release
 
 VERSION_FULL  = f"{VERSION}.{BUILD}-{STAGE}"   # e.g. "0.9.27-beta"
 VERSION_TITLE = f"SoloTone  v{VERSION_FULL}"   # for the window title bar
@@ -23,6 +23,26 @@ VERSION_TITLE = f"SoloTone  v{VERSION_FULL}"   # for the window title bar
 CHANGELOG = [
 
     # ── 1.0 release candidates ────────────────────────────────────────────────
+
+    (6, "2026-11-17", "FEATURE",
+     "Release Candidate 2 (v1.0.6-rc2). (1) AI tone (Rig tab): describe a sound "
+     "in words and get pedal settings, EQ, gain and up to four scenes. Either copy "
+     "a ready-made prompt into any chat AI and paste its answer back (free), or "
+     "ask Claude directly with your own Anthropic API key (billed separately by "
+     "Anthropic). Every value is clamped to its control's real range, unknown "
+     "settings are dropped, and Undo restores the previous scenes; only the "
+     "description, the amp/cab file names and the settings' names and ranges are "
+     "sent, never audio. (2) Four scenes (A to D) per profile: pedals, settings, EQ "
+     "and gains, switched from the top bar, MIDI or keys, saved in the profile and "
+     "drawn as small pedal boards in the Library. (3) Library: profile folders by "
+     "band, a description drop-down under the profile name. (4) Optional Tank-G / "
+     "UltraRig add-on (only when the tankg-bridge folder is present): Load to "
+     "Tank-G, scenes sent as the pedal's own scenes, a Go live mode that turns "
+     "SoloTone into the pedal's remote over serial with nothing stored on it, an "
+     "on-air light and a tuner button; the pedal is muted while a sound is being "
+     "sent. (5) Envelope wah, Tone Bender, rotary speaker, inspector panel. "
+     "(6) New profiles: Santa Monica and Father of Mine (Everclear). The "
+     "no-network claims now say the optional AI request is the one exception."),
 
     (5, "2026-11-04", "FEATURE",
      "Recording, re-amping, Master Volume, level matching, profile notes. "

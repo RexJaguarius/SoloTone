@@ -3,12 +3,24 @@
 A fully graphical desktop app (Tkinter) for guitarists and
 bassists: a real-time amp/FX processor, a pedal-effects chain, a
 multi-layer looper, a chromatic tuner (with a dedicated Bass mode), and a
-sample-accurate metronome — all running locally, with no telemetry and no
-network access.
+sample-accurate metronome — all running locally, with no telemetry. The only
+thing that can use the network is the optional AI tone feature, and only when you send a request.
 
 ## Features
 
-**Amp / FX Processor** (I/O & Levels, Signal Chain tabs)
+**Layout**
+- **Top bar, always visible:** START AMP, and the current profile with Save, Load and a shortcut to the Library
+- **Rig tab:** the whole signal path on one screen, drawn as a chain of tiles joined by a light-blue line:
+  Input, the pre-amp pedals, the Amp (NAM model, cabinet IRs, EQ), the post-amp pedals and Output. Click any
+  tile to open its settings in the panel below: the Input tile holds the audio input, input gain, noise gate and
+  hum filter; the Amp tile the NAM model, IRs and EQ; the Output tile the audio output, block size, levels and
+  Master Volume; each pedal its own controls. Pedals are dragged to reorder or onto the Inactive tray to bypass
+- **Play tab:** Looper, Record and Metronome (pill buttons switch between them); the tuner stays in the footer
+- **Library tab:** a searchable list of every Tone Profile in your profiles folder, grouped by folder, with a
+  preview of its notes; double-click to load. The notes for the current profile are edited here too
+- **Settings tab:** Keybinds and MIDI, Window and appearance, and (when the add-on is present) Tank-G
+
+**Amp / FX Processor** (Rig tab: Input, Amp and Output tiles)
 - Low-latency duplex audio stream: reads your instrument input, writes
   processed audio to your output device in real time
 - **NAM (Neural Amp Modeler) amp modeling** via a from-scratch numpy
@@ -46,11 +58,9 @@ network access.
   renamed), it falls back to System default with a warning naming exactly
   which one couldn't be found, instead of silently picking the wrong
   device
-- The I/O & Levels tab's sections (Audio Devices, Levels, Noise Gate, Hum
-  Filter) behave as an accordion, same as Pedals — Audio Devices starts
-  open, the rest start closed. **Start Amp** sits above the accordion in
-  a fixed row, always visible regardless of which section is open or how
-  far the tab is scrolled
+- Audio device, level, noise gate and hum filter settings live on the
+  Input and Output tiles' pages on the Rig tab. **Start Amp** sits in the
+  top bar, always visible whichever tab is open
 - Adjustable audio block size (256/512/1024/2048 samples — smaller sizes
   were dropped after real-world testing showed they can't keep up with a
   full NAM+IR chain), live xrun counter and latency readout
@@ -83,6 +93,9 @@ network access.
   rotors speeding up and slowing down between them) or stop on Brake; Depth, Level and
   adjustable Slow/Fast rates, in the spirit of the Keeley Dark Side's rotary. A MIDI
   trigger flips Slow/Fast
+- **Pitch shifter** — up to two voices from -12 to +12 semitones (octaves, fifths,
+  harmonies) with fine tune in cents, so it also works as a detuner; Mix runs from dry to
+  shifted voices only. Sits ahead of the fuzz by default
 - Fuzz — Fuzz Face (asymmetric germanium-style clip), Tone Bender (more gain,
   tighter low end, mid hump) or Big Muff
   (cascaded hard clip with Full/Flat/Scoop tone voicings)
@@ -98,8 +111,9 @@ network access.
 - **Tremolo** — rate, depth and a shape control from smooth sine to choppy
 - Delay — Tape or Digital voicing, manual time or BPM-linked to the
   metronome (dotted-8th / quarter / half note)
-- Reverb — **Room** (the original Schroeder reverb), **Plate**, **Spring** or
-  **Cloud** (size, decay, damping, mix; decay and damping apply to the last three)
+- Reverb — **Room** (the original Schroeder reverb), **Plate**, **Spring**,
+  **Cloud** or **Shimmer** (size, decay, damping, mix; decay and damping apply to the
+  last four; Shimmer feeds the tail back an octave higher, with its own amount control)
 - Every effect has its own bypass, so pedals can be clicked in and out
   independently while playing
 - **Per-pedal mini-presets** — each pedal's own section has Save
@@ -143,13 +157,27 @@ network access.
   Requires the optional `Pillow` package (see Setup); without it every pedal opens
   as a tab in the inspector instead
 
-**Tone Profiles** (Signal Chain tab)
+**Tone Profiles** (top bar and Library tab)
 - **Save Profile… / Load Profile…** capture a whole recallable sound in
   one file: NAM path, all 5 IR paths + active slot + labels, the entire
   pedal chain (every effect's parameters plus chain order), any MIDI
   controller mappings for the pedals, 5-band EQ + Level, noise gate
   threshold, input/output gain, hum filter, and the guitar/bass tuning
   preset
+- **AI tone** (Rig tab, "AI tone…"): describe a sound in words and get pedal settings, EQ, gain and up to four scenes. Copy a
+  ready-made prompt into any chat AI you already use (free) and paste its answer back, or, optionally, ask Claude directly with your
+  own Anthropic API key (billed separately by Anthropic, not covered by a Claude subscription; sent only to api.anthropic.com; only
+  your description, the amp/cab file names and the settings' names and ranges are sent, never audio). Every
+  value is clamped to the real range of its control before it reaches the rig, and **Undo** brings your previous scenes back.
+- **Four scenes per profile (A to D)**, switched from the top bar, with a MIDI pad or a key (Settings, under Transport).
+  A scene is a variation of the sound: which pedals are on and their settings, the EQ and the input/output gain. The
+  capture, the cab IRs and the order of the chain stay the same. An empty scene starts as a copy of the one you are on;
+  right-click a scene to rename or clear it. Scenes are saved with the profile (Save…); a profile saved before scenes
+  existed simply opens on scene A
+- **Tank-G live mode** (only with the optional Tank-G add-on): a Go live switch in the top bar plays the profile on a
+  Tank-G running UltraRig and keeps the pedal in step as you play: pedals on and off, knobs, EQ, gains and scenes A to D
+  are sent as you change them. Nothing is stored on the pedal, no preset is overwritten; USB audio is not used, only the
+  serial port
 - A **Notes** box under the Save/Load buttons is saved with the profile —
   pickup position, guitar volume/tone settings, playing tips
 - Stored as JSON with its own `.stprofile` extension, in their own
@@ -326,16 +354,24 @@ tuning preset, selected pedal states, pedal chain order, keybind mappings,
 collapsed-section state, theme colors, and window settings, and the loaded NAM/IR file
 paths are all saved on close and restored on next launch.
 
-## Coming soon: M-VAVE Tank-G / UltraRig
+## Optional: M-VAVE Tank-G / UltraRig
 
-SoloTone has an optional **Tank-G tab** that sends your Tone Profiles to an
-M-VAVE Tank-G running the third-party
-[UltraRig](https://github.com/manuaguirre9/ultrarig) firmware, so a profile
-you built on the computer can be played on the pedal on its own. It maps
-each SoloTone pedal to the matching UltraRig block, fits the result to the
-pedal's CPU and memory, and loads it into a preset slot. The tab only shows
-up when a separate add-on folder is present, and that add-on is not part of
-this release. It is still in development and not available yet.
+An optional add-on (the `tankg-bridge` folder) connects SoloTone to an M-VAVE Tank-G running the third-party
+[UltraRig](https://github.com/manuaguirre9/ultrarig) firmware (tested on alphas 11 and 13). With it, a
+**Tank-G** section appears in Settings, the Library gets a **Load to Tank-G** button, and the top bar a **Go live** switch:
+
+- **Send** a Tone Profile to a preset slot (the NAM capture, the cab IR and the pedal chain, fitted to the pedal's CPU and memory), with
+  its four scenes as the pedal's scenes, or just **play** it on the pedal without saving
+- **Live mode** turns SoloTone into the pedal's remote: pedals, knobs, EQ, gains and scenes are sent as you change them, and nothing is
+  stored on the pedal. It uses only the USB serial connection, not USB audio
+- It never deletes anything from the pedal and asks before replacing a preset
+
+It needs `pyserial` and the UltraRig firmware, and is not made or endorsed by UltraRig or M-VAVE. See `tankg-bridge/README.md`.
+
+## If something goes wrong
+
+SoloTone writes every uncaught error, with the last UI actions that led to it, to `solotone_error.log` next to the app (or
+the `.exe`), and a hard crash to `solotone_crash.log`. Nothing is shown on screen: send those two files with a bug report.
 
 ## Setup
 
@@ -375,7 +411,7 @@ SoloTone does not support ASIO. The PortAudio build bundled with
 `sounddevice` has no ASIO host API, so ASIO drivers (including ASIO4ALL or an
 interface's own ASIO driver) won't appear and aren't needed. On Windows pick
 your interface under **WASAPI** (the default) or **WDM-KS** in the Host API
-dropdown on the I/O & Levels tab.
+dropdown on the Output tile's page (Rig tab).
 
 ## Recording into a DAW
 
@@ -385,7 +421,7 @@ DAW for recording:
 
 1. Install a virtual audio mixer, e.g. [VoiceMeeter](https://vb-audio.com/Voicemeeter/)
    (free) or a simpler [VB-CABLE](https://vb-audio.com/Cable/) loopback.
-2. Set SoloTone's Output device (I/O & Levels tab) to the virtual
+2. Set SoloTone's Output device (Rig tab, Output tile) to the virtual
    input the mixer/cable exposes.
 3. In your DAW, record from the matching virtual output device.
 
@@ -410,7 +446,8 @@ from SoloTone) and the virtual cable feeding the DAW at the same time.
   convention used by most commercial tuners for transposing instruments;
   double-check against your instrument's part if it matters for ensemble
   tuning.
-- Everything runs locally — no network access, no telemetry.
+- Everything runs locally with no telemetry. The one optional exception is **AI tone**: if you choose to ask Claude directly
+  (your own API key), that request goes to api.anthropic.com. The copy-and-paste route never touches the network.
 
 ## Platform support & testing
 
@@ -429,7 +466,7 @@ python tests/test_app_smoke.py       # builds the real window; needs a display
 
 That proves it launches and processes audio sanely on each OS; it can't judge
 tone or feel, which still needs a person with a guitar. Current build:
-**1.0.5-rc1** (release candidate 1).
+**1.0.6-rc2** (release candidate 2).
 
 Layout: `solotone.py` (app/GUI), `pedals.py` (pedal-effects DSP),
 `nam_engine.py` (Neural Amp Modeler inference), `version.py` (version +

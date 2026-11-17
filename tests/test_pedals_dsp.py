@@ -185,7 +185,7 @@ def _run_blocks(fn, signal):
 def test_default_order_puts_time_effects_after_amp():
     assert DEFAULT_PEDAL_ORDER.count(AMP_MARKER) == 1
     i = DEFAULT_PEDAL_ORDER.index(AMP_MARKER)
-    assert set(DEFAULT_PEDAL_ORDER[:i]) == {'comp', 'wah', 'fuzz', 'dist', 'od', 'phaser'}
+    assert set(DEFAULT_PEDAL_ORDER[:i]) == {'comp', 'wah', 'pitch', 'fuzz', 'dist', 'od', 'phaser'}
     assert set(DEFAULT_PEDAL_ORDER[i + 1:]) == {'chorus', 'tremolo', 'rotary', 'delay', 'reverb'}
 
 
@@ -306,14 +306,14 @@ def test_room_reverb_is_unchanged_by_the_new_types():
 
 def test_full_chain_with_every_pedal_engaged():
     p = PedalChain(sr=SR)
-    for name in ('comp', 'wah', 'fuzz', 'dist', 'od', 'phaser', 'chorus', 'tremolo', 'delay', 'reverb'):
+    for name in ('comp', 'wah', 'pitch', 'fuzz', 'dist', 'od', 'phaser', 'chorus', 'tremolo', 'rotary', 'delay', 'reverb'):
         setattr(p, name + '_on', True)
     p.od_mode = 'bd2'; p.chorus_mode = 'doubler'; p.reverb_type = 'spring'
     out = np.zeros(len(_SIGNAL), dtype=np.float64)
     for pos in range(0, len(_SIGNAL) - BLOCK + 1, BLOCK):
         y = p.process(_SIGNAL[pos:pos + BLOCK], metro_bpm=120)
         out[pos:pos + BLOCK] = p.process_post(y, metro_bpm=120)
-    assert_sane(out, 'full chain, all 10 pedals engaged')
+    assert_sane(out, 'full chain, every pedal engaged')
 
 
 def test_pre_and_post_stages_only_run_their_own_pedals():
@@ -354,7 +354,7 @@ def test_normalize_order_keeps_legacy_orders_pre_amp():
     # amp; the two newer pedals are added (phaser just ahead of the amp, tremolo just after it)
     custom = ['comp', 'od', 'chorus', 'delay', 'reverb', 'wah', 'fuzz', 'dist']
     got = normalize_order(custom)
-    assert [c for c in got if c not in ('phaser', 'tremolo')][:len(custom)] == custom
+    assert [c for c in got if c not in ('phaser', 'tremolo', 'rotary', 'pitch')][:len(custom)] == custom
     assert got.index('phaser') == got.index(AMP_MARKER) - 1
     assert got.index('tremolo') == got.index(AMP_MARKER) + 1
     assert sorted(c for c in got if c != AMP_MARKER) == sorted(c for c in DEFAULT_PEDAL_ORDER if c != AMP_MARKER)
@@ -375,14 +375,14 @@ def test_orders_saved_before_phaser_and_tremolo_get_them_added():
     assert got.index('phaser') == got.index(AMP_MARKER) - 1                  # end of the pre-amp half
     assert got.index('tremolo') == got.index('chorus') + 1                   # right after the chorus
     assert got.index('rotary') == got.index('tremolo') + 1                   # the rotary follows the tremolo
-    assert [c for c in got if c not in ('phaser', 'tremolo', 'rotary')] == custom   # nothing else moved
+    assert [c for c in got if c not in ('phaser', 'tremolo', 'rotary', 'pitch')] == custom   # nothing else moved
     # an untouched order from the phaser/tremolo era is upgraded to the new factory order; a custom one gains the rotary
     era = ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser', AMP_MARKER, 'chorus', 'tremolo', 'delay', 'reverb']
     assert normalize_order(era) == DEFAULT_PEDAL_ORDER
     swapped = ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser', AMP_MARKER, 'delay', 'chorus', 'tremolo', 'reverb']
     got = normalize_order(swapped)
     assert got.index('rotary') == got.index('tremolo') + 1
-    assert [c for c in got if c != 'rotary'] == swapped
+    assert [c for c in got if c not in ('rotary', 'pitch')] == swapped
     assert normalize_order([c for c in DEFAULT_PEDAL_ORDER if c != 'rotary']) is not None
     assert normalize_order([c for c in DEFAULT_PEDAL_ORDER if c != 'comp']) is None
 
@@ -478,6 +478,85 @@ def test_rotary_speeds_up_slows_down_and_brakes():
     for _ in range(600):
         p._fx_rotary(sig)
     assert p._rot_rate[0] < 0.05 and p._rot_rate[1] < p._rot_rate[0] * 0 + 0.5
+
+
+def _f0(x, sr=SR):
+    """Fundamental by autocorrelation (works on a harmonic, guitar-like tone)."""
+    x = x - x.mean()
+    n = len(x)
+    ac = np.fft.irfft(np.abs(np.fft.rfft(x, 2 * n)) ** 2)[:n]
+    lo, hi = int(sr / 1000), int(sr / 70)
+    k = lo + int(np.argmax(ac[lo:hi]))
+    a, b, c = ac[k - 1], ac[k], ac[k + 1]
+    return sr / (k + 0.5 * (a - c) / (a - 2 * b + c))
+
+
+def test_pitch_shifter_moves_a_tone_by_the_requested_interval():
+    t = np.arange(SR * 2) / SR
+    for base in (196.0, 330.0):
+        sig = 0.2 * sum(a * np.sin(2 * np.pi * base * n * t) for n, a in ((1, 1.0), (2, 0.5), (3, 0.3), (4, 0.15)))
+        for semis in (12, -12, 7, -5, 3):
+            p = PedalChain(sr=SR); p.pitch_on, p.pitch_semi, p.pitch_mix = True, semis, 1.0
+            out = np.concatenate([p._fx_pitch(sig[i:i + BLOCK]) for i in range(0, len(sig), BLOCK)])[SR // 2:SR]
+            want = base * 2 ** (semis / 12)
+            cents = 1200 * np.log2(_f0(out) / want)
+            assert abs(cents) < 15, f'{base} Hz {semis:+d} semitones: {cents:+.0f} cents off'
+            ratio = np.sqrt(np.mean(out ** 2)) / np.sqrt(np.mean(sig ** 2))
+            assert 0.4 < ratio < 1.3, 'the level should stay close to the input'
+    # the cents control fine-tunes: +50 cents at 0 semitones
+    p = PedalChain(sr=SR); p.pitch_on, p.pitch_semi, p.pitch_cents, p.pitch_mix = True, 0, 50, 1.0
+    out = np.concatenate([p._fx_pitch(sig[i:i + BLOCK]) for i in range(0, len(sig), BLOCK)])[SR // 2:SR]
+    assert abs(1200 * np.log2(_f0(out) / base) - 50) < 15
+
+
+def test_pitch_shifter_is_stable_and_does_not_depend_on_the_block_size():
+    sig = _SIGNAL[:SR].astype(np.float64)
+    def run(block):
+        p = PedalChain(sr=SR); p.pitch_on, p.pitch_semi, p.pitch_level2, p.pitch_semi2 = True, 12, 0.5, -5
+        return np.concatenate([p._fx_pitch(sig[i:i + block]) for i in range(0, len(sig), block)])
+    a, b, c = run(256), run(100), run(1024)
+    assert_sane(a, 'pitch shifter')
+    n = min(len(a), len(b), len(c))
+    assert np.allclose(a[:n], b[:n], atol=1e-6) and np.allclose(a[:n], c[:n], atol=1e-6)
+
+
+def test_pitch_mix_zero_and_off_leave_the_sound_alone():
+    sig = _SIGNAL[:SR // 2].astype(np.float64)
+    p = PedalChain(sr=SR)
+    assert np.array_equal(p._fx_pitch(sig), sig)                       # off
+    p.pitch_on, p.pitch_mix = True, 0.0
+    assert np.array_equal(p._fx_pitch(sig), sig)                       # on, but all dry
+
+
+def test_shimmer_reverb_has_a_tail_with_octave_up_content_and_stays_stable():
+    t = np.arange(SR // 4) / SR
+    burst = np.concatenate((0.4 * np.sin(2 * np.pi * 330.0 * t), np.zeros(SR * 3)))
+    def run(rtype, block):
+        p = PedalChain(sr=SR); p.reverb_on, p.reverb_type, p.reverb_mix, p.reverb_decay = True, rtype, 1.0, 0.7
+        return np.concatenate([p._fx_reverb(burst[i:i + block].astype(np.float64)) for i in range(0, len(burst), block)])
+    sh, cl = run('shimmer', 256), run('cloud', 256)
+    assert_sane(sh, 'shimmer reverb')
+    tail = slice(SR, SR * 2)
+    assert np.sqrt(np.mean(sh[tail] ** 2)) > 1e-3, 'the shimmer tail should ring on'
+    assert np.sqrt(np.mean(sh[-SR // 2:] ** 2)) < np.sqrt(np.mean(sh[tail] ** 2)), 'and fade, not build up'
+    def band(x, lo, hi):
+        sp = np.abs(np.fft.rfft(x * np.hanning(len(x)))) ** 2
+        f = np.fft.rfftfreq(len(x), 1 / SR)
+        return sp[(f > lo) & (f < hi)].sum()
+    up_sh = band(sh[tail], 600, 720) / band(sh[tail], 280, 380)          # octave above 330 Hz vs the note itself
+    up_cl = band(cl[tail], 600, 720) / band(cl[tail], 280, 380)
+    assert up_sh > up_cl * 3, 'the shimmer tail should carry much more octave-up energy than a plain cloud tail'
+    other = run('shimmer', 100)
+    n = min(len(sh), len(other))
+    assert np.allclose(sh[:n], other[:n], atol=1e-6), 'block size must not change the shimmer reverb'
+
+
+def test_orders_saved_before_the_pitch_shifter_get_it_ahead_of_the_fuzz():
+    old_default = ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser', AMP_MARKER, 'chorus', 'tremolo', 'rotary', 'delay', 'reverb']
+    assert normalize_order(old_default) == DEFAULT_PEDAL_ORDER
+    custom = ['wah', 'comp', 'od', 'fuzz', 'dist', 'phaser', AMP_MARKER, 'rotary', 'tremolo', 'chorus', 'delay', 'reverb']
+    out = normalize_order(custom)
+    assert out.index('pitch') == out.index('fuzz') - 1 and [c for c in out if c != 'pitch'] == custom
 
 
 if __name__ == '__main__':

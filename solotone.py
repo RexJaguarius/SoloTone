@@ -10,6 +10,7 @@ is a required sibling module, not an optional extra — it has no UI
 dependency of its own, which is what let it split out cleanly.
 """
 
+import copy
 import json
 import math
 import os
@@ -27,10 +28,15 @@ import queue
 import threading
 import time
 import traceback
+import faulthandler
+import collections
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, colorchooser
+import tkinter.font as tkfont
+from tkinter import ttk, messagebox, filedialog, colorchooser, simpledialog
 
 import numpy as np
+
+import ai_tone
 
 try:
     import sounddevice as sd
@@ -1774,7 +1780,7 @@ PEDAL_MODE_CYCLE = {
     'pedal_od_on':     ('od_mode',     ['tubescreamer', 'klon', 'bd2', 'boost']),
     'pedal_chorus_on': ('chorus_mode', ['chorus', 'flanger', 'vibrato', 'doubler']),
     'pedal_delay_on':  ('delay_mode',  ['tape', 'digital']),
-    'pedal_reverb_on': ('reverb_type', ['room', 'plate', 'spring', 'cloud']),
+    'pedal_reverb_on': ('reverb_type', ['room', 'plate', 'spring', 'cloud', 'shimmer']),
 }
 
 # Each entry: id (stored in the mapping file), label (Settings-tab UI),
@@ -1824,6 +1830,10 @@ MIDI_MAPPABLE_TARGETS = [
     dict(id='od_drive',      label='Overdrive Drive', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('od_drive', 1.0, 10.0)),
 
+    dict(id='pedal_pitch_on', label='Pitch Shifter Enabled', category='Pedals', kind='toggle',
+         action=_midi_toggle_action('pitch_var', lambda app, v: setattr(app.amp.pedals, 'pitch_on', v))),
+    dict(id='pitch_mix',     label='Pitch Shifter Mix', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('pitch_mix', 0.0, 1.0)),
     dict(id='pedal_phaser_on', label='Phaser Enabled', category='Pedals', kind='toggle',
          action=_midi_toggle_action('phaser_var', lambda app, v: setattr(app.amp.pedals, 'phaser_on', v))),
     dict(id='phaser_rate',   label='Phaser Rate', category='Pedals', kind='cc',
@@ -1865,6 +1875,8 @@ MIDI_MAPPABLE_TARGETS = [
          action=_midi_pedal_cc_action('reverb_size', 0.1, 1.0)),
     dict(id='reverb_mix',    label='Reverb Mix', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('reverb_mix', 0.0, 1.0)),
+    dict(id='reverb_shimmer', label='Reverb Shimmer', category='Pedals', kind='cc',
+         action=_midi_pedal_cc_action('reverb_shimmer', 0.0, 1.0)),
     dict(id='reverb_decay',  label='Reverb Decay', category='Pedals', kind='cc',
          action=_midi_pedal_cc_action('reverb_decay', 0.0, 1.0)),
 
@@ -1918,6 +1930,19 @@ MIDI_MAPPABLE_TARGETS = [
          action=_midi_toggle_action('ir_blend_on_var', lambda app, v: app._toggle_ir_blend())),
     dict(id='ir_blend_amount', label='Cabinet IR Blend Amount', category='Transport', kind='cc',
          action=_midi_ir_blend_action()),
+]
+# Scenes: four variations of the loaded profile (see App._scene_select). Filed under Transport like the other pad triggers.
+SCENE_COUNT = 4
+SCENE_LETTERS = 'ABCD'
+MIDI_MAPPABLE_TARGETS += [
+    dict(id=f'scene_{SCENE_LETTERS[i].lower()}', label=f'Scene {SCENE_LETTERS[i]}', category='Transport', kind='trigger',
+         action=_midi_trigger_action(lambda app, i=i: app._scene_select(i)))
+    for i in range(SCENE_COUNT)
+] + [
+    dict(id='scene_next', label='Next Scene', category='Transport', kind='trigger',
+         action=_midi_trigger_action(lambda app: app._scene_step(1))),
+    dict(id='scene_prev', label='Previous Scene', category='Transport', kind='trigger',
+         action=_midi_trigger_action(lambda app: app._scene_step(-1))),
 ]
 MIDI_TARGETS_BY_ID = {t['id']: t for t in MIDI_MAPPABLE_TARGETS}
 
@@ -2156,6 +2181,7 @@ PEDAL_SECTION_TITLES = {
     'fuzz':   'Fuzz',
     'dist':   'Distortion',
     'od':     'Overdrive / Boost',
+    'pitch':  'Pitch Shifter',
     'phaser': 'Phaser',
     'chorus': 'Chorus / Flanger / Vibrato / Doubler',
     'tremolo': 'Tremolo',
@@ -2189,6 +2215,7 @@ PEDAL_ICON_SPECS = {
     'fuzz':   ('FUZZ', '#c1611f'),
     'dist':   ('DIST', '#a83c3c'),
     'od':     ('OD',   '#c99a2e'),
+    'pitch':  ('PITCH', '#2f8f83'),
     'phaser': ('PHAS', '#b0507a'),
     'chorus': ('CHOR', '#3d84a8'),
     'tremolo': ('TREM', '#4f7f9a'),
@@ -2202,12 +2229,13 @@ PEDAL_ICON_SPECS = {
 # short text from the live PedalChain.
 PEDAL_BOARD_NAMES = {
     'comp': 'Compressor', 'wah': 'Wah', 'fuzz': 'Fuzz', 'dist': 'Distortion', 'od': 'Overdrive',
-    'phaser': 'Phaser', 'chorus': 'Chorus', 'tremolo': 'Tremolo', 'rotary': 'Rotary', 'delay': 'Delay', 'reverb': 'Reverb',
+    'pitch': 'Pitch', 'phaser': 'Phaser', 'chorus': 'Chorus', 'tremolo': 'Tremolo', 'rotary': 'Rotary',
+    'delay': 'Delay', 'reverb': 'Reverb',
 }
 PEDAL_GROUPS = [
     ('Dynamics & filter', ('comp', 'wah')),
     ('Drive',             ('fuzz', 'dist', 'od')),
-    ('Modulation',        ('phaser', 'chorus', 'tremolo', 'rotary')),
+    ('Modulation',        ('pitch', 'phaser', 'chorus', 'tremolo', 'rotary')),
     ('Time',              ('delay', 'reverb')),
 ]
 _PEDAL_TYPE_NAMES = {
@@ -2218,7 +2246,7 @@ _PEDAL_TYPE_NAMES = {
     'chorus_mode': {'chorus': 'Chorus', 'flanger': 'Flanger', 'vibrato': 'Vibrato', 'doubler': 'Doubler'},
     'delay_mode': {'tape': 'Tape', 'digital': 'Digital'},
     'rotary_speed': {'slow': 'Slow', 'fast': 'Fast', 'brake': 'Brake'},
-    'reverb_type': {'room': 'Room', 'plate': 'Plate', 'spring': 'Spring', 'cloud': 'Cloud'},
+    'reverb_type': {'room': 'Room', 'plate': 'Plate', 'spring': 'Spring', 'cloud': 'Cloud', 'shimmer': 'Shimmer'},
 }
 
 def PEDAL_BOARD_SUMMARY(code, p):
@@ -2230,6 +2258,7 @@ def PEDAL_BOARD_SUMMARY(code, p):
     if code == 'fuzz':    return t('fuzz_mode')
     if code == 'dist':    return t('dist_mode')
     if code == 'od':      return t('od_mode')
+    if code == 'pitch':   return f'{int(p.pitch_semi):+d} st' + (f' / {int(p.pitch_semi2):+d}' if p.pitch_level2 > 0 else '')
     if code == 'phaser':  return f'{p.phaser_rate:.1f} Hz'
     if code == 'chorus':  return t('chorus_mode')
     if code == 'tremolo': return f'{p.tremolo_rate:.1f} Hz'
@@ -2237,6 +2266,13 @@ def PEDAL_BOARD_SUMMARY(code, p):
     if code == 'delay':   return f'{t("delay_mode")} {p._delay_time_secs() * 1000:.0f} ms'
     if code == 'reverb':  return t('reverb_type')
     return ''
+
+# The three fixed blocks of the Rig: not pedals (no on/off, no drag), but each opens its own page in the inspector.
+RIG_TILES = {
+    'input':  ('Input',  'Audio input, input gain, noise gate, hum filter'),
+    'amp':    ('Amp',    'NAM model, cabinet IRs, EQ'),
+    'output': ('Output', 'Audio output, levels, master volume'),
+}
 
 PEDAL_ICON_SIZE = (56, 72)   # px
 _PEDAL_ICON_PHOTO_CACHE = {}   # code -> ImageTk.PhotoImage, built once and reused
@@ -2283,6 +2319,22 @@ def _get_pedal_icon_photo(code, dim=False):
         _UI_IMAGE_REFS.append(photo)
     return photo
 
+_SMALL_ICON_CACHE = {}
+
+def _get_small_pedal_icon(code, dim=False, size=(24, 31)):
+    """The pedal's board icon scaled down, for the Library's scene overview (lit = on in that scene, washed out = off)."""
+    key = (code, dim, size)
+    ph = _SMALL_ICON_CACHE.get(key)
+    if ph is None and HAS_PIL:
+        label, fill = PEDAL_ICON_SPECS[code]
+        img = _build_pedal_icon_image(label, fill)
+        if dim:
+            img = _dim_icon_image(img)
+        ph = ImageTk.PhotoImage(img.resize(size, Image.LANCZOS))
+        _SMALL_ICON_CACHE[key] = ph
+        _UI_IMAGE_REFS.append(ph)
+    return ph
+
 
 class _FlowFrame(tk.Frame):
     """Children flow left to right and wrap to the width, like words in a paragraph (a pedal's control cards)."""
@@ -2298,6 +2350,7 @@ class _FlowFrame(tk.Frame):
         return w
 
     def set_visible(self, w, visible):
+        w = getattr(w, 'outer', w)
         (self._hidden.discard if visible else self._hidden.add)(w)
         self._key = None
         self.reflow()
@@ -2899,6 +2952,51 @@ IR_DIR    = _APP_DIR / 'irs'
 PROFILE_DIR = _APP_DIR / 'profiles'
 PEDAL_PRESET_DIR = _APP_DIR / 'pedal_presets'
 
+# ── error logging ────────────────────────────────────────────
+# Every uncaught error (in a Tk callback, the main thread or a worker thread) is written to solotone_error.log next to the app
+# with the last UI actions that led to it; a hard crash (a fault inside Tk, Pillow or PortAudio) is written to solotone_crash.log
+# by faulthandler. Nothing is shown on screen: look at those two files.
+ERROR_LOG = _APP_DIR / 'solotone_error.log'
+CRASH_LOG = _APP_DIR / 'solotone_crash.log'
+_UI_TRAIL = collections.deque(maxlen=60)
+_FAULT_FILE = None
+
+def _trail(msg):
+    """Remember a UI action, so an error report says what you were doing."""
+    try:
+        _UI_TRAIL.append(time.strftime('%H:%M:%S') + '  ' + str(msg))
+    except Exception:
+        pass
+
+def _log_error(kind, exc_type, exc, tb):
+    try:
+        with open(ERROR_LOG, 'a', encoding='utf-8') as f:
+            f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')}  {kind}  (SoloTone v{VERSION_FULL}, Python {sys.version.split()[0]}) =====\n")
+            f.write(''.join(traceback.format_exception(exc_type, exc, tb)))
+            f.write('--- recent UI actions, oldest first ---\n' + '\n'.join(_UI_TRAIL) + '\n')
+    except Exception:
+        pass
+
+def _install_crash_logging():
+    global _FAULT_FILE
+    def _hook(t, e, tb):
+        _log_error('uncaught error', t, e, tb)
+        sys.__excepthook__(t, e, tb)
+    sys.excepthook = _hook
+    try:
+        def _thook(args):
+            _log_error('error in thread ' + str(getattr(args.thread, 'name', '?')), args.exc_type, args.exc_value, args.exc_traceback)
+        threading.excepthook = _thook
+    except Exception:
+        pass
+    try:
+        _FAULT_FILE = open(CRASH_LOG, 'a', encoding='utf-8')
+        _FAULT_FILE.write(f"\n===== started {time.strftime('%Y-%m-%d %H:%M:%S')}  SoloTone v{VERSION_FULL} =====\n")
+        _FAULT_FILE.flush()
+        faulthandler.enable(_FAULT_FILE, all_threads=True)
+    except Exception:
+        _FAULT_FILE = None
+
 def _ensure_dirs():
     NAM_DIR.mkdir(exist_ok=True)
     IR_DIR.mkdir(exist_ok=True)
@@ -2933,19 +3031,25 @@ PEDAL_PROFILE_FIELDS = [
     'fuzz_on', 'fuzz_mode', 'fuzz_drive', 'fuzz_vol', 'muff_tone',
     'dist_on', 'dist_mode', 'dist_drive', 'dist_tone', 'dist_vol',
     'od_on', 'od_mode', 'od_drive', 'od_vol',
+    'pitch_on', 'pitch_semi', 'pitch_cents', 'pitch_semi2', 'pitch_level2', 'pitch_mix',
     'phaser_on', 'phaser_rate', 'phaser_depth', 'phaser_feedback',
     'chorus_on', 'chorus_mode', 'chorus_rate', 'chorus_depth', 'chorus_mix',
     'tremolo_on', 'tremolo_rate', 'tremolo_depth', 'tremolo_shape',
     'rotary_on', 'rotary_speed', 'rotary_slow', 'rotary_fast', 'rotary_depth', 'rotary_ramp', 'rotary_mix',
     'delay_on', 'delay_mode', 'delay_bpm_link', 'delay_note', 'delay_time',
     'delay_feedback', 'delay_mix',
-    'reverb_on', 'reverb_type', 'reverb_mix', 'reverb_size', 'reverb_decay', 'reverb_damp',
+    'reverb_on', 'reverb_type', 'reverb_mix', 'reverb_size', 'reverb_decay', 'reverb_damp', 'reverb_shimmer',
 ]
 
 # Each pedal setting's factory value, read from a fresh PedalChain — what a
 # setting returns to when a loaded profile doesn't mention it (see _apply_profile).
 PEDAL_FACTORY_VALUES = {f: getattr(PedalChain(SAMPLE_RATE), f)
                         for f in PEDAL_PROFILE_FIELDS if f != 'order'}
+
+# A scene is a variation of the loaded profile, the same idea as UltraRig's four scenes per preset: it holds what a
+# player changes with a foot (which pedals are on, their settings, the EQ, the input/output level) and NOT what makes the
+# rig itself (the amp capture, the cabinet IRs, the order of the chain, the gate, the hum filter, the tuner mute).
+SCENE_PEDAL_FIELDS = [f for f in PEDAL_PROFILE_FIELDS if f not in ('order', 'mute')]
 
 # Per-pedal mini-presets — a Tone Profile captures the whole chain at
 # once; these capture just ONE pedal's own settings, reusable across
@@ -2958,7 +3062,7 @@ PEDAL_PRESET_FIELDS = {
     code: [f for f in PEDAL_PROFILE_FIELDS if f.startswith(prefix)]
     for code, prefix in {
         'comp': 'comp_', 'wah': 'wah_', 'fuzz': 'fuzz_', 'dist': 'dist_',
-        'od': 'od_', 'phaser': 'phaser_', 'chorus': 'chorus_', 'tremolo': 'tremolo_', 'rotary': 'rotary_',
+        'od': 'od_', 'pitch': 'pitch_', 'phaser': 'phaser_', 'chorus': 'chorus_', 'tremolo': 'tremolo_', 'rotary': 'rotary_',
         'delay': 'delay_', 'reverb': 'reverb_',
     }.items()
 }
@@ -3126,12 +3230,13 @@ class App(tk.Tk):
     def __init__(self):
         global ACCENT, BG   # possibly overwritten below by a saved custom theme
         super().__init__()
+        _install_crash_logging()
         _pick_ui_font()
         self.title(f'SoloTone  v{VERSION_FULL}')
         _set_app_icon(self)
         self.configure(bg=BG)
-        self.geometry('900x720')
-        self.minsize(800, 600)
+        self.geometry('1180x860')
+        self.minsize(900, 640)
 
         self.beat_q  = queue.Queue(maxsize=16)
         self.metro   = Metronome(self.beat_q)
@@ -3159,7 +3264,7 @@ class App(tk.Tk):
         # factory colors first. _load_session() only re-checks the rest
         # of the file later, after the UI already exists.
         self._section_collapsed = {}
-        self._insp_open, self._insp_sel, self._insp_h, self._insp_max = [], None, 260, False
+        self._insp_open, self._insp_sel, self._insp_h, self._insp_max = ['amp'], 'amp', 260, False
         # title -> outer section frame, and group name -> [titles] — built
         # fresh by every _sec() call as tabs are (re)built, never cleared
         # elsewhere, so a single-tab rebuild (_rebuild_pedals_ui) leaves
@@ -3172,7 +3277,7 @@ class App(tk.Tk):
                 _early_session = json.load(f)
             self._section_collapsed = _early_session.get('section_collapsed', {})
             _pp = _early_session.get('pedal_panel') or {}
-            self._insp_open = [c for c in _pp.get('open', []) if c in PEDAL_SECTION_TITLES]
+            self._insp_open = [c for c in _pp.get('open', ['amp']) if c in PEDAL_SECTION_TITLES or c in RIG_TILES]
             self._insp_sel = _pp.get('sel') if _pp.get('sel') in self._insp_open else (self._insp_open[-1] if self._insp_open else None)
             self._insp_h = max(150, int(_pp.get('h', 260)))
             accent = _early_session.get('theme_accent')
@@ -3214,6 +3319,12 @@ class App(tk.Tk):
         self._last_ir_dir  = None
         self._last_profile_dir  = None
         self._current_profile_path = None
+        self._scene_reset()
+        self._live = None                  # Tank-G live mode, see _live_start
+        self._live_state = 'off'           # off | starting | live | stopping | error
+        self._live_q, self._live_ev = queue.Queue(), queue.Queue()
+        self._live_sig = self._live_last = self._live_seen = None
+        self._live_restart = False
         # code -> preset name last saved/loaded for that pedal, or None —
         # survives _rebuild_pedals_ui() (a full tab rebuild, the same
         # mechanism a Tone Profile load already uses) since it lives here
@@ -3337,6 +3448,12 @@ class App(tk.Tk):
 
         self._setup_rounded_buttons(s)
         self._setup_folder_tabs(s)
+        self._setup_cards(s)
+        s.configure('Treeview', background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=24,
+                    borderwidth=0, font=(FF, 10))
+        s.configure('Treeview', bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL)
+        s.configure('Treeview.Heading', background=BG_WELL, foreground=DIM, font=(FF, 9, 'bold'))
+        s.map('Treeview', background=[('selected', ACCENT)], foreground=[('selected', ACCENT_DARK)])
 
     # The notebook's tabs, drawn as the tabs of a file folder.
     _TAB_IMG_SIZE = (60, 28)    # source image (px); ttk stretches its flat middle to each tab's width
@@ -3397,6 +3514,46 @@ class App(tk.Tk):
                     ('Notebook.label', {'side': 'top', 'sticky': ''})]})]})])
         # the panel's own edge, in the accent colour, so the selected tab joins it
         style.configure('TNotebook', bordercolor=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT)
+
+    # Rounded panels. A card is a ttk.Frame whose look is a 9-slice rounded-rectangle image, with a plain tk.Frame
+    # (the "body") packed inside it with padding wider than the corner radius, so nothing inside ever touches a corner.
+    _CARD_RADIUS = 10
+    _CARD_TILE = 320            # source image size (px): see _setup_cards
+    _card_generation = 0
+
+    def _setup_cards(self, style):
+        if not HAS_PIL:
+            return
+        App._card_generation += 1
+        gen = App._card_generation
+        r = self._CARD_RADIUS
+        for tag, backdrop in (('Card', BG), ('CardP', PANEL), ('CardW', BG_WELL)):
+            # The middle of a 9-slice image is repainted by TILING it, so a small image makes a tall card (the Keybinds list is
+            # thousands of pixels high) cost hundreds of thousands of tile draws per repaint: that froze the Settings tab for
+            # 40 s. A large flat centre makes it a handful of draws.
+            img = _button_asset_image((self._CARD_TILE, self._CARD_TILE), r, PANEL, '#2b333b', backdrop, 1)
+            photo = ImageTk.PhotoImage(img)
+            _UI_IMAGE_REFS.append(photo)
+            style.element_create(f'{tag}{gen}.bd', 'image', photo, border=r, sticky='nsew')
+            style.layout(f'{tag}.TFrame', [(f'{tag}{gen}.bd', {'sticky': 'nswe'})])
+
+    def _card(self, parent, title=None, nested=False, pack=False, pad=(10, 8), **pk):
+        """A rounded panel. Returns its body (a tk.Frame to build into); the panel itself is body.outer, which is what
+        gets packed or gridded (pass pack=True to have it packed full width). With a title, an accent heading sits at the top."""
+        if HAS_PIL:
+            outer = ttk.Frame(parent, style=('CardP.TFrame' if nested else 'Card.TFrame'))
+        else:
+            outer = tk.Frame(parent, bg=PANEL, highlightthickness=1, highlightbackground='#2e2e2e')
+        body = tk.Frame(outer, bg=PANEL)
+        body.pack(fill='both', expand=True, padx=pad[0], pady=pad[1])
+        body.outer = outer
+        if title:
+            tk.Label(body, text=title, bg=PANEL, fg=ACCENT, font=(FF, 10, 'bold'), anchor='w').pack(fill='x', pady=(0, 3))
+        if pack:
+            opts = dict(fill='x', padx=8, pady=6)
+            opts.update(pk)
+            outer.pack(**opts)
+        return body
 
     # A ttk 9-slice image element's `border` sets a hard MINIMUM button
     # size along each axis (measured: height = 31 + 2*border, regardless
@@ -3505,46 +3662,36 @@ class App(tk.Tk):
 
     # ── top-level layout ─────────────────────────────────────
 
+    TAB_RIG, TAB_PLAY, TAB_LIBRARY, TAB_SETTINGS = 0, 1, 2, 3
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tk calls this for an error inside any button, key or timer callback. Log it, then do what Tk would have done."""
+        _log_error('Tk callback', exc, val, tb)
+        traceback.print_exception(exc, val, tb)
+
     def _build(self):
-        # ── persistent tuner footer ──────────────────────────
-        self._build_footer()
-
-        # ── notebook ─────────────────────────────────────────
-        nb = ttk.Notebook(self)
-        self._notebook = nb   # kept so _full_rebuild_ui() can restore the selected tab
-        nb.pack(fill='both', expand=True, padx=8, pady=(3,0))
-
-        t_io    = ttk.Frame(nb)
-        t_chain = ttk.Frame(nb)
-        t_loop  = ttk.Frame(nb)
-        t_rec   = ttk.Frame(nb)
-        t_metro = ttk.Frame(nb)
-
-        t_pedals   = ttk.Frame(nb)
-        t_settings = ttk.Frame(nb)
-        # Optional Tank-G tab: only exists when the tankg-bridge add-on folder is present.
+        # Optional Tank-G section: only exists when the tankg-bridge add-on folder is present.
         if getattr(self, '_tankg', None) is None:
             self._tankg = _load_tankg_api()
-        t_tank = ttk.Frame(nb) if self._tankg is not None else None
-        nb.add(t_io,       text='  I/O & Levels  ')
-        nb.add(t_chain,    text='  Signal Chain  ')
-        nb.add(t_pedals,   text='  Pedals  ')
-        nb.add(t_loop,     text='  Looper  ')
-        nb.add(t_rec,      text='  Record  ')
-        nb.add(t_metro,    text='  Metronome  ')
-        if t_tank is not None:
-            nb.add(t_tank, text='  Tank-G  ')
+        # ── persistent tuner footer, and the top bar (amp, profile) ──
+        self._build_footer()
+        self._build_topbar()
+
+        # ── four tabs: the whole rig on one screen; practice tools; the profile library; settings ──
+        nb = ttk.Notebook(self)
+        self._notebook = nb   # kept so _full_rebuild_ui() can restore the selected tab
+        nb.pack(fill='both', expand=True, padx=8, pady=(3, 0))
+        nb.bind('<<NotebookTabChanged>>', lambda e: _trail('tab -> ' + str(nb.tab(nb.select(), 'text')).strip()))
+        t_rig, t_play, t_lib, t_settings = (ttk.Frame(nb) for _ in range(4))
+        nb.add(t_rig,      text='  Rig  ')
+        nb.add(t_play,     text='  Play  ')
+        nb.add(t_lib,      text='  Library  ')
         nb.add(t_settings, text='  Settings  ')
 
-        self._pedals_tab_root = t_pedals  # kept to allow rebuilding after a profile load
-        self._tab_io(t_io)
-        self._tab_chain(t_chain)
-        self._tab_pedals(t_pedals)
-        self._tab_looper(t_loop)
-        self._tab_record(t_rec)
-        self._tab_metro(t_metro)
-        if t_tank is not None:
-            self._tab_tankg(t_tank)
+        self._pedals_tab_root = t_rig  # kept to allow rebuilding after a profile load
+        self._tab_pedals(t_rig)
+        self._tab_play(t_play)
+        self._tab_library(t_lib)
         self._tab_settings(t_settings)
 
         # Global keybind dispatch — single <KeyPress>/<KeyRelease> binds
@@ -3554,6 +3701,505 @@ class App(tk.Tk):
         # itself. See _on_key_press/_on_key_release.
         self.bind_all('<KeyPress>', self._on_key_press)
         self.bind_all('<KeyRelease>', self._on_key_release)
+
+    def _build_topbar(self):
+        """Always visible, whichever tab is open: start / stop the amp, and the current profile with quick access to the
+        Library and to Load / Save."""
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(side='top', fill='x', padx=10, pady=(8, 2))
+        self.amp_btn = ttk.Button(bar, text='▶  START AMP', style='Go.TButton', command=self._toggle_amp)
+        self.amp_btn.pack(side='left', ipadx=14)
+        self.amp_stat = tk.Label(bar, text='Stopped', bg=BG, fg=DIM, font=(FF, 11))
+        self.amp_stat.pack(side='left', padx=(12, 16))
+        pill = self._card(bar, None, pad=(14, 7))
+        # (packed last, below: the scene and live cards claim their width first, so on a narrow window it is the
+        # profile name that gives way, never the buttons)
+        tk.Label(pill, text='PROFILE', bg=PANEL, fg=DIM, font=(FF, 8, 'bold')).pack(side='left', padx=(0, 10))
+        for text, cmd in (('Save…', lambda: self._save_profile()), ('Load…', lambda: self._load_profile()),
+                          ('Library', lambda: self._notebook.select(self.TAB_LIBRARY))):
+            self._mini_btn(pill, text, cmd).pack(side='right', padx=(4, 0))
+        # small arrow: drops the profile's description below the bar (a tooltip-style panel)
+        self._desc_pill, self._desc_open = pill, False
+        self.desc_arrow = tk.Label(pill, text='▾', bg=PANEL, fg=DIM, font=(FF, 11), cursor='hand2', padx=4)
+        self.desc_arrow.pack(side='right', padx=(0, 2))
+        self.desc_arrow.bind('<Button-1>', lambda e: self._desc_toggle())
+        self.desc_arrow.bind('<Enter>', lambda e: self.desc_arrow.configure(fg=FG))
+        self.desc_arrow.bind('<Leave>', lambda e: self.desc_arrow.configure(fg=ACCENT if self._desc_open else DIM))
+        self.profile_lbl = tk.Label(pill, text='No profile loaded', bg=PANEL, fg=DIM, font=(FF, 11, 'bold'), anchor='w')
+        self.profile_lbl.pack(side='left', fill='x', expand=True)
+        scn = self._card(bar, None, pad=(12, 7))
+        tk.Label(scn, text='SCENE', bg=PANEL, fg=DIM, font=(FF, 8, 'bold')).pack(side='left', padx=(0, 8))
+        self._scene_btns = []
+        for i in range(SCENE_COUNT):
+            b = tk.Label(scn, text=SCENE_LETTERS[i], bd=0, cursor='hand2', compound='center', font=(FF, 10, 'bold'),
+                         bg=PANEL, fg=FG, padx=0 if HAS_PIL else 9, pady=0 if HAS_PIL else 2)
+            b.pack(side='left', padx=(0, 4))
+            b.bind('<Button-1>', lambda e, i=i: self._scene_select(i))
+            b.bind('<Button-3>', lambda e, i=i: self._scene_menu(e, i))
+            self._scene_btns.append(b)
+        self._scene_imgs = {}
+        self._scene_refresh_ui()
+        # Tank-G live mode: only on a build that has the tankg-bridge add-on next to it
+        self.live_btn = self.live_lbl = None
+        if getattr(self, '_tankg', None) is not None:
+            lv = self._card(bar, None, pad=(12, 7))
+            lv.outer.pack(side='right', padx=(8, 0))
+            tk.Label(lv, text='TANK-G', bg=PANEL, fg=DIM, font=(FF, 8, 'bold')).pack(side='left', padx=(0, 8))
+            self.live_btn = self._mini_btn(lv, 'Go live', self._live_toggle, width_px=84)
+            self.live_btn.pack(side='left')
+            # the studio "on air" light: dark when off, amber while sending, red when live
+            self.live_light = tk.Canvas(lv, width=18, height=18, bg=PANEL, highlightthickness=0, bd=0)
+            self.live_light.pack(side='left', padx=(8, 0))
+            self._live_bulb = self.live_light.create_oval(3, 3, 15, 15, fill='#3a2024', outline='#1c1012', width=1)
+            self._live_glow = self.live_light.create_oval(0, 0, 18, 18, outline='', fill='')
+            self.live_lbl = tk.Label(lv, text='', bg=PANEL, fg=DIM, font=(FF, 9), width=8, anchor='w')
+            self.live_lbl.pack(side='left', padx=(8, 0))
+            # tuning fork: puts the pedal into its own tuner (output muted) and back
+            self._tuner_on = False
+            self.fork = tk.Canvas(lv, width=26, height=26, bg=PANEL, highlightthickness=0, bd=0, cursor='hand2')
+            self.fork.pack(side='left', padx=(4, 0))
+            self.fork.bind('<Button-1>', lambda e: self._tuner_toggle())
+            self.fork.bind('<Enter>', lambda e: self._fork_paint(hover=True))
+            self.fork.bind('<Leave>', lambda e: self._fork_paint())
+            self._fork_paint()
+            self._live_paint()
+            if not getattr(self, '_live_polling', False):
+                self._live_polling = True
+                self.after(200, self._live_tick)
+        scn.outer.pack(side='right', padx=(8, 0))
+        pill.outer.pack(side='left', fill='x', expand=True)
+
+    def _desc_text(self):
+        try:
+            t = self.profile_notes.get('1.0', 'end-1c').strip()
+        except (tk.TclError, AttributeError):
+            t = ''
+        return (t[:1500] + ('…' if len(t) > 1500 else '')) if t else 'No description saved with this profile. Write one in the Rig tab (profile notes), then Save.'
+
+    def _desc_toggle(self, force=None):
+        want = (not self._desc_open) if force is None else force
+        box = getattr(self, '_desc_box', None)
+        if not want:
+            if box is not None:
+                box.place_forget()
+            self._desc_open = False
+            self.desc_arrow.configure(text='▾', fg=DIM)
+            return
+        if box is None:
+            box = self._desc_box = tk.Frame(self, bg=PANEL, highlightthickness=1, highlightbackground=ACCENT)
+            self._desc_name = tk.Label(box, bg=PANEL, fg=ACCENT, font=(FF, 9, 'bold'), anchor='w')
+            self._desc_name.pack(fill='x', padx=12, pady=(8, 2))
+            self._desc_lbl = tk.Label(box, bg=PANEL, fg=FG, font=(FF, 10), anchor='nw', justify='left', wraplength=520)
+            self._desc_lbl.pack(fill='x', padx=12, pady=(0, 10))
+            self.bind('<Escape>', lambda e: self._desc_toggle(False), add='+')
+            self.bind('<Button-1>', lambda e: self._desc_click_away(e), add='+')
+        self._desc_refresh()
+        self._desc_open = True
+        self.desc_arrow.configure(text='▴', fg=ACCENT)
+        self.update_idletasks()
+        pill = self._desc_pill.outer
+        x = max(0, pill.winfo_rootx() - self.winfo_rootx())
+        y = pill.winfo_rooty() - self.winfo_rooty() + pill.winfo_height() + 2
+        box.place(x=x, y=y)
+        box.lift()
+
+    def _desc_refresh(self):
+        self._desc_name.configure(text=self.profile_lbl.cget('text'))
+        self._desc_lbl.configure(text=self._desc_text())
+
+    def _desc_click_away(self, e):
+        if not self._desc_open:
+            return
+        w = e.widget
+        while w is not None:
+            if w is self._desc_box or w is self.desc_arrow:
+                return
+            w = getattr(w, 'master', None)
+        self._desc_toggle(False)
+
+    def _set_profile_label(self, name):
+        self.profile_lbl.configure(text=name, fg=FG)
+        if getattr(self, '_desc_open', False):
+            self.after(50, self._desc_refresh)
+        lib = getattr(self, '_lib_cur_card', None)
+        if lib is not None:
+            try:
+                lib.configure(text=f'Current profile  ·  {name}')
+            except tk.TclError:
+                pass
+        if hasattr(self, '_lib_tree'):
+            self._library_refresh(keep=True)
+
+    # ── pill buttons (a segmented control) ───────────────────
+
+    def _pill_bar(self, parent, items, command, selected=None):
+        """Rounded pill buttons, one selected at a time. items: [(key, label)]. Returns (bar, select(key))."""
+        bar = tk.Frame(parent, bg=BG)
+        font = (FF, 10, 'bold')
+        btns, imgs = {}, {}
+        state = {'sel': None}
+        h = 28
+
+        def img(w, fill, outline):
+            if not HAS_PIL:
+                return None
+            ph = ImageTk.PhotoImage(_button_asset_image((w, h), h // 2, fill, outline, BG, 1))
+            _UI_IMAGE_REFS.append(ph)
+            return ph
+
+        def paint(key):
+            on = state['sel'] == key
+            lbl = btns[key]
+            lbl.configure(fg=(ACCENT_DARK if on else FG), bg=(ACCENT if on else BG) if not HAS_PIL else BG)
+            if HAS_PIL:
+                lbl.configure(image=imgs[key]['on' if on else 'off'])
+
+        def select(key, notify=True):
+            state['sel'] = key
+            for k in btns:
+                paint(k)
+            if notify and command:
+                command(key)
+
+        for key, text in items:
+            try:
+                w = self._text_width(font, text) + 34
+            except tk.TclError:
+                w = 104
+            lbl = tk.Label(bar, text=text, font=font, bd=0, cursor='hand2', compound='center', bg=BG, fg=FG,
+                           padx=0 if HAS_PIL else 14, pady=0 if HAS_PIL else 3)
+            imgs[key] = dict(on=img(w, ACCENT, _scale_color(ACCENT, 0.6)), off=img(w, PANEL, '#33404a'),
+                             hover=img(w, _lighten_color(PANEL, 14), '#4a5a66'))
+            if HAS_PIL:
+                lbl.configure(width=w, height=h)
+            lbl.pack(side='left', padx=(0, 6))
+            lbl.bind('<Button-1>', lambda e, k=key: select(k))
+            if HAS_PIL:
+                lbl.bind('<Enter>', lambda e, k=key: btns[k].configure(image=imgs[k]['hover']) if state['sel'] != k else None)
+                lbl.bind('<Leave>', lambda e, k=key: paint(k))
+            btns[key] = lbl
+        select(selected or items[0][0], notify=False)
+        return bar, select
+
+    def _stacked_pages(self, root, items, attr, extra_top=None):
+        """A pill bar over a stack of pages (each page a frame the caller builds into). Returns {key: frame}."""
+        top = tk.Frame(root, bg=BG)
+        top.pack(fill='x', padx=10, pady=(8, 4))
+        host = tk.Frame(root, bg=BG)
+        host.pack(fill='both', expand=True)
+        host.grid_rowconfigure(0, weight=1)
+        host.grid_columnconfigure(0, weight=1)
+        pages = {}
+        for key, _txt in items:
+            f = ttk.Frame(host)
+            f.grid(row=0, column=0, sticky='nsew')
+            pages[key] = f
+        last = getattr(self, attr, None)
+        sel = last if last in pages else items[0][0]
+
+        def show(key):
+            _trail(f'pill {attr} -> {key}')
+            setattr(self, attr, key)
+            pages[key].tkraise()
+        bar, select = self._pill_bar(top, items, show, selected=sel)
+        bar.pack(side='left')
+        show(sel)
+        self._pill_selectors = getattr(self, '_pill_selectors', {})
+        self._pill_selectors[attr] = select
+        return pages
+
+    def _tab_play(self, root):
+        """The practice tools, one pill each: Looper, Record, Metronome."""
+        pages = self._stacked_pages(root, [('looper', 'Looper'), ('record', 'Record'), ('metro', 'Metronome')], '_play_sel')
+        self._tab_looper(pages['looper'])
+        self._tab_record(pages['record'])
+        self._tab_metro(pages['metro'])
+
+    # ── Library: browse and load Tone Profiles ───────────────
+
+    def _tab_library(self, root):
+        root.grid_columnconfigure(0, weight=5, minsize=300)
+        root.grid_columnconfigure(1, weight=6, minsize=380)
+        root.grid_rowconfigure(0, weight=1)
+        left = tk.Frame(root, bg=BG)
+        left.grid(row=0, column=0, sticky='nsew', padx=(10, 5), pady=8)
+        right = tk.Frame(root, bg=BG)
+        right.grid(row=0, column=1, sticky='nsew', padx=(5, 10), pady=8)
+
+        # the list: search, then the profiles grouped by folder
+        lc = self._card(left, None, pad=(10, 10))
+        lc.outer.pack(fill='both', expand=True)
+        top = tk.Frame(lc, bg=PANEL)
+        top.pack(fill='x', pady=(0, 6))
+        self.lib_search_var = tk.StringVar()
+        ent = tk.Entry(top, textvariable=self.lib_search_var, bg=BG_WELL, fg=FG, insertbackground=FG, relief='flat',
+                       font=(FF, 11), highlightthickness=1, highlightbackground='#2c333b', highlightcolor=ACCENT)
+        ent.pack(side='left', fill='x', expand=True, ipady=5)
+        # a hint inside the empty search box (cleared on focus; the filter ignores it)
+        ph = 'Search profiles…'
+        self._lib_ph = True
+        ent.insert(0, ph)
+        ent.configure(fg=DIM)
+
+        def _focus_in(_e):
+            if self._lib_ph:
+                self._lib_ph = False
+                ent.delete(0, 'end')
+                ent.configure(fg=FG)
+
+        def _focus_out(_e):
+            if not ent.get():
+                self._lib_ph = True
+                ent.insert(0, ph)
+                ent.configure(fg=DIM)
+        ent.bind('<FocusIn>', _focus_in)
+        ent.bind('<FocusOut>', _focus_out)
+        self._mini_btn(top, 'Refresh', lambda: self._library_refresh(keep=True)).pack(side='left', padx=(6, 0))
+        self._mini_btn(top, 'Folder', self._library_open_folder).pack(side='left', padx=(4, 0))
+        self.lib_search_var.trace_add('write', lambda *_a: self._library_refresh(keep=True))
+        tw = tk.Frame(lc, bg=PANEL)
+        tw.pack(fill='both', expand=True)
+        self._lib_tree = ttk.Treeview(tw, show='tree', selectmode='browse')
+        vsb = ttk.Scrollbar(tw, orient='vertical', command=self._lib_tree.yview)
+        self._lib_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        self._lib_tree.pack(side='left', fill='both', expand=True)
+        self._lib_tree.tag_configure('current', foreground=ACCENT)
+        self._lib_tree.bind('<<TreeviewSelect>>', lambda e: self._library_select())
+        self._lib_tree.bind('<Double-1>', lambda e: self._library_load())
+        self._lib_tree.bind('<Return>', lambda e: self._library_load())
+        self._lib_count = tk.Label(lc, text='', bg=PANEL, fg=DIM, font=(FF, 9), anchor='w')
+        self._lib_count.pack(fill='x', pady=(6, 0))
+
+        # the selected profile: what it is, and the load button
+        sc = self._card(right, None, pad=(14, 12))
+        sc.outer.pack(fill='x')
+        self._lib_name = tk.Label(sc, text='Pick a profile', bg=PANEL, fg=FG, font=(FF, 14, 'bold'), anchor='w',
+                                  wraplength=520, justify='left')
+        self._lib_name.pack(fill='x')
+        self._lib_meta = tk.Label(sc, text='Double-click a profile in the list, or select it and press Load.',
+                                  bg=PANEL, fg=DIM, font=(FF, 9), anchor='w', wraplength=520, justify='left')
+        self._lib_meta.pack(fill='x', pady=(2, 6))
+        self._lib_notes = tk.Text(sc, height=6, wrap='word', bg=BG_WELL, fg=FG, relief='flat', font=(FF, 10), padx=8, pady=6,
+                                  highlightthickness=1, highlightbackground='#2c333b', state='disabled')
+        self._lib_notes.pack(fill='x')
+        self._lib_scene_box = tk.Frame(sc, bg=PANEL)        # the selected profile's scenes, drawn by _lib_scenes_render
+        self._lib_scene_box.pack(fill='x', pady=(8, 0))
+        brow = tk.Frame(sc, bg=PANEL)
+        brow.pack(fill='x', pady=(8, 0))
+        self.lib_load_btn = ttk.Button(brow, text='Load profile', style='Go.TButton', command=self._library_load)
+        self.lib_load_btn.pack(side='left')
+        ttk.Button(brow, text='Load from file…', command=self._load_profile).pack(side='left', padx=8)
+        # Only on a build that has the optional tankg-bridge add-on next to it (see _load_tankg_api); without it the button
+        # is not there at all.
+        self.lib_tg_btn = self.lib_tg_lbl = None
+        if getattr(self, '_tankg', None) is not None:
+            self.lib_tg_btn = ttk.Button(brow, text='Load to Tank-G', command=self._library_to_tankg)
+            self.lib_tg_btn.pack(side='left')
+            ok, why = self._tankg.available()
+            if not ok:
+                self.lib_tg_btn.configure(state='disabled')
+            self.lib_tg_lbl = tk.Label(sc, text='' if ok else f'Tank-G: {why}', bg=PANEL, fg=DIM, font=(FF, 9), anchor='w',
+                                       wraplength=520, justify='left')
+            self.lib_tg_lbl.pack(fill='x', pady=(6, 0))
+
+        # the current profile: its notes (saved with it) and Save
+        cc = self._card(right, None, pad=(14, 12))
+        cc.outer.pack(fill='both', expand=True, pady=(10, 0))
+        self._lib_cur_card = tk.Label(cc, text='Current profile', bg=PANEL, fg=ACCENT, font=(FF, 10, 'bold'), anchor='w')
+        self._lib_cur_card.pack(fill='x')
+        tk.Label(cc, text='Notes  (saved with the profile: pickup, guitar knobs, tips)', bg=PANEL, fg=DIM,
+                 font=(FF, 9), anchor='w').pack(fill='x', pady=(2, 2))
+        nrow = tk.Frame(cc, bg=PANEL)
+        nrow.pack(fill='both', expand=True)
+        self.profile_notes = tk.Text(nrow, height=5, wrap='word', bg=BG_WELL, fg=FG, insertbackground=FG, relief='flat',
+                                     font=(FF, 10), padx=8, pady=6, highlightthickness=1, highlightbackground='#2c333b',
+                                     highlightcolor=ACCENT, undo=True)
+        nsb = ttk.Scrollbar(nrow, orient='vertical', command=self.profile_notes.yview)
+        self.profile_notes.configure(yscrollcommand=nsb.set)
+        nsb.pack(side='right', fill='y')
+        self.profile_notes.pack(side='left', fill='both', expand=True)
+        srow = tk.Frame(cc, bg=PANEL)
+        srow.pack(fill='x', pady=(8, 0))
+        ttk.Button(srow, text='Save profile…', command=self._save_profile).pack(side='left')
+        tk.Label(srow, text=f'.{PROFILE_EXT.lstrip(".")}: the NAM and IR files, every pedal, EQ, gains, tuning',
+                 bg=PANEL, fg=DIM, font=(FF, 9)).pack(side='left', padx=10)
+        self._lib_items = {}
+        self._lib_sel = None
+        self._library_refresh()
+
+    def _library_scan(self):
+        """[(folder, name, path)] for every Tone Profile under the profiles folder."""
+        out = []
+        try:
+            for f in PROFILE_DIR.rglob('*' + PROFILE_EXT):
+                rel = f.relative_to(PROFILE_DIR)
+                out.append((str(rel.parent) if str(rel.parent) != '.' else '', f.stem, str(f)))
+        except OSError:
+            pass
+        return sorted(out, key=lambda t: (t[0].lower(), t[1].lower()))
+
+    def _library_refresh(self, keep=False):
+        tree = getattr(self, '_lib_tree', None)
+        if tree is None:
+            return
+        try:
+            tree.winfo_exists()
+        except tk.TclError:
+            return
+        sel_path = self._lib_sel if keep else None
+        terms = [] if getattr(self, '_lib_ph', False) else self.lib_search_var.get().lower().split()
+        tree.delete(*tree.get_children())
+        self._lib_items = {}
+        rows = self._library_scan()
+        cur = getattr(self, '_current_profile_path', None)
+        shown, groups, node = 0, {}, {}
+        for folder, name, path in rows:
+            hay = (folder + ' ' + name).lower()
+            if not all(t in hay for t in terms):
+                continue
+            if folder not in groups:
+                groups[folder] = tree.insert('', 'end', text=(folder.replace('\\', ' / ') or 'Profiles'),
+                                             open=bool(terms) or len(set(r[0] for r in rows)) <= 3)
+            same = cur and os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(cur))
+            iid = tree.insert(groups[folder], 'end', text='  ' + name, tags=(('current',) if same else ()))
+            self._lib_items[iid] = path
+            node[path] = iid
+            shown += 1
+        self._lib_count.configure(text=(f'{shown} of {len(rows)} profiles' if terms else f'{len(rows)} profiles')
+                                  + f'  ·  {PROFILE_DIR}')
+        if sel_path in node:
+            tree.selection_set(node[sel_path])
+            tree.see(node[sel_path])
+
+    def _library_open_folder(self):
+        try:
+            PROFILE_DIR.mkdir(exist_ok=True)
+            if sys.platform.startswith('win'):
+                os.startfile(str(PROFILE_DIR))
+            else:
+                import subprocess
+                subprocess.Popen(['open' if sys.platform == 'darwin' else 'xdg-open', str(PROFILE_DIR)])
+        except Exception as e:
+            messagebox.showerror('Open folder', str(e))
+
+    def _library_select(self):
+        _trail('library select')
+        sel = self._lib_tree.selection()
+        path = self._lib_items.get(sel[0]) if sel else None
+        self._lib_sel = path
+        notes = ''
+        if path is None:
+            self._lib_name.configure(text='Pick a profile')
+            self._lib_meta.configure(text='Double-click a profile in the list, or select it and press Load.')
+        else:
+            try:
+                data = json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
+            except Exception as e:
+                data = {}
+                notes = f'Could not read this file: {e}'
+            self._lib_name.configure(text=data.get('name') or pathlib.Path(path).stem)
+            nam = pathlib.Path(data['nam_path']).stem if data.get('nam_path') else 'no NAM model'
+            irs = [x for x in (data.get('ir_paths') or []) if x]
+            on = sum(1 for k, v in (data.get('pedals') or {}).items() if k.endswith('_on') and v is True)
+            self._lib_meta.configure(text=f'{nam}  ·  {len(irs)} cab IR{"s" if len(irs) != 1 else ""}  ·  {on} pedal{"s" if on != 1 else ""} on'
+                                          f'  ·  {data.get("tuning", "")}')
+            notes = data.get('notes') or notes
+        self._lib_notes.configure(state='normal')
+        self._lib_notes.delete('1.0', 'end')
+        self._lib_notes.insert('1.0', notes or '(no notes)')
+        self._lib_notes.configure(state='disabled')
+        self._lib_scenes_render(data if path is not None else None)
+
+    def _lib_scenes_render(self, data):
+        """The selected profile's four scenes as small boards: the pedals in chain order, lit when they are on in that scene,
+        washed out when off (the same icons as the Rig tab), with the scene's name and what it does to the input level."""
+        box = self._lib_scene_box
+        for c in box.winfo_children():
+            c.destroy()
+        if not data:
+            return
+        pedals = data.get('pedals') or {}
+        codes = [c for c in (pedals.get('order') or []) if c in PEDAL_ICON_SPECS] or list(PEDAL_ICON_SPECS)
+        blk = data.get('scenes') if isinstance(data.get('scenes'), dict) else {}
+        slots = list(blk.get('slots') or [])[:SCENE_COUNT]
+        slots += [None] * (SCENE_COUNT - len(slots))
+        names = list(blk.get('names') or [''] * SCENE_COUNT)
+        active = blk.get('active') if isinstance(blk.get('active'), int) else 0
+        has = any(isinstance(x, dict) for x in slots)
+        if not has:                       # a profile from before scenes: its own settings are scene A
+            slots[0] = {'pedals': pedals, 'in_gain': data.get('in_gain', 1.0)}
+            active = 0
+        head = tk.Frame(box, bg=PANEL)
+        head.pack(fill='x', pady=(0, 4))
+        tk.Label(head, text='SCENES', bg=PANEL, fg=DIM, font=(FF, 8, 'bold')).pack(side='left')
+        tk.Label(head, text=('opens on ' + SCENE_LETTERS[active] if has else 'none saved: this profile opens as scene A'),
+                 bg=PANEL, fg=DIM, font=(FF, 9)).pack(side='left', padx=8)
+        grid = tk.Frame(box, bg=PANEL)
+        grid.pack(fill='x')
+        for col in range(2):
+            grid.grid_columnconfigure(col, weight=1, uniform='scene')
+            grid.grid_rowconfigure(col, weight=1, uniform='scenerow')
+        for i in range(SCENE_COUNT):
+            snap = slots[i] if isinstance(slots[i], dict) and isinstance(slots[i].get('pedals'), dict) else None
+            live = has and i == active
+            card = tk.Frame(grid, bg=BG_WELL, highlightthickness=1, highlightbackground=(ACCENT if live else '#2c333b'))
+            card.grid(row=i // 2, column=i % 2, sticky='nsew', padx=(0, 6 if i % 2 == 0 else 0), pady=(0, 6))
+            top = tk.Frame(card, bg=BG_WELL)
+            top.pack(fill='x', padx=8, pady=(6, 2))
+            tk.Label(top, text=SCENE_LETTERS[i], bg=(ACCENT if snap else '#2c333b'), fg=(ACCENT_DARK if snap else DIM),
+                     font=(FF, 10, 'bold'), width=2).pack(side='left')
+            nm = (names[i] if i < len(names) and isinstance(names[i], str) else '').strip()
+            tk.Label(top, text=nm or ('empty' if snap is None else ''), bg=BG_WELL, fg=(FG if snap else DIM),
+                     font=(FF, 10, 'bold' if snap else 'normal'), anchor='w').pack(side='left', padx=8)
+            if snap is None:
+                continue
+            on_flags = {c: bool(snap['pedals'].get(c + '_on')) for c in codes}
+            strip = tk.Frame(card, bg=BG_WELL)
+            strip.pack(fill='x', padx=8, pady=(2, 2))
+            for n, c in enumerate(codes):
+                ico = _get_small_pedal_icon(c, dim=not on_flags[c])
+                if ico is not None:
+                    tk.Label(strip, image=ico, bg=BG_WELL, bd=0).grid(row=n // 6, column=n % 6, padx=1, pady=1)
+                else:
+                    tk.Label(strip, text=PEDAL_ICON_SPECS[c][0], bg=BG_WELL, fg=(FG if on_flags[c] else DIM),
+                             font=(FF, 8)).grid(row=n // 6, column=n % 6, padx=2)
+            lit = [PEDAL_BOARD_NAMES[c] for c in codes if on_flags[c]]
+            try:
+                gdb = 20.0 * math.log10(max(1e-9, float(snap.get('in_gain', 1.0))))
+            except (TypeError, ValueError):
+                gdb = 0.0
+            tk.Label(card, text=' · '.join(lit) or 'no pedals', bg=BG_WELL, fg=FG, font=(FF, 8), anchor='w', justify='left',
+                     wraplength=230).pack(fill='x', padx=8)
+            tk.Label(card, text=f'input {gdb:+.0f} dB', bg=BG_WELL, fg=DIM, font=(FF, 8), anchor='w').pack(fill='x', padx=8, pady=(0, 6))
+
+    def _library_load(self):
+        if self._lib_sel:
+            self._load_profile_path(self._lib_sel)
+
+    def _library_to_tankg(self):
+        """Load the selected profile and play it on the Tank-G, without saving anything on the pedal (the Tank-G tab under
+        Settings is where a slot is chosen and saved). Uses the port picked there; with none picked it takes the Tank-G it finds."""
+        if not self._lib_sel:
+            self._lib_tg_say('Pick a profile first.', bad=True)
+            return
+        if getattr(self, '_tg_busy', False):
+            return
+        self._tg_refresh_ports()
+        if not self._tg_port_device():
+            self._lib_tg_say('No Tank-G found. Plug it in, close the UltraRig page, and try again.', bad=True)
+            return
+        _trail('library -> tank-g')
+        self._load_profile_path(self._lib_sel)
+        self._tg_play()
+
+    def _lib_tg_say(self, text, bad=False):
+        lbl = getattr(self, 'lib_tg_lbl', None)
+        if lbl is not None:
+            try:
+                lbl.configure(text=text, fg=RED if bad else FG)
+            except tk.TclError:
+                pass
 
     def _apply_theme(self, accent_hex, bg_hex):
         """Change the accent/background color and rebuild the whole UI to
@@ -3588,6 +4234,7 @@ class App(tk.Tk):
         self._apply_theme(DEFAULT_ACCENT, DEFAULT_BG)
 
     def _full_rebuild_ui(self):
+        _trail('full UI rebuild')
         selected_idx = None
         nb = getattr(self, '_notebook', None)
         if nb is not None:
@@ -3818,11 +4465,11 @@ class App(tk.Tk):
         """
         if color is None:
             color = ACCENT
-        outer = tk.Frame(parent, bg=BG)
-        outer.pack(fill='x', padx=8, pady=6)
-        inner = tk.Frame(outer, bg=PANEL)
+        card = self._card(parent, None, pack=True)
+        outer = card.outer
+        inner = tk.Frame(card, bg=PANEL)
         collapsed = self._section_collapsed.get(title, default_collapsed)
-        hdr = tk.Label(outer, text=self._sec_hdr_text(title, collapsed), bg='#1a2128', fg=color,
+        hdr = tk.Label(card, text=self._sec_hdr_text(title, collapsed), bg=PANEL, fg=color,
                        font=(FF,11,'bold'), anchor='w', cursor='hand2')
         hdr.pack(fill='x')
 
@@ -3838,7 +4485,7 @@ class App(tk.Tk):
             now = not self._section_collapsed.get(title, default_collapsed)
             self._section_collapsed[title] = now
             if now: inner.pack_forget()
-            else:   inner.pack(fill='x', pady=(0,2))
+            else:   inner.pack(fill='x', pady=(4,0))
             hdr.configure(text=self._sec_hdr_text(title, now))
             hook = getattr(self, '_on_section_toggled', None)
             if hook is not None:
@@ -3856,7 +4503,7 @@ class App(tk.Tk):
 
         hdr.bind('<Button-1>', _toggle)
         if not collapsed:
-            inner.pack(fill='x', pady=(0,2))
+            inner.pack(fill='x', pady=(4,0))
 
         def _force_expand():
             """Expand this section if it's currently collapsed, otherwise
@@ -3924,25 +4571,11 @@ class App(tk.Tk):
 
     # ── TAB 1: I/O & Levels ──────────────────────────────────
 
-    def _tab_io(self, root):
-        # Packed into `root` directly, before the scrollable accordion
-        # area below claims the rest of the tab — Start Amp is the one
-        # control on this tab you need no matter which section is open or
-        # how far you've scrolled, so it lives outside the accordion
-        # entirely instead of inside a collapsible "Transport" section.
-        tr_row = tk.Frame(root, bg=BG); tr_row.pack(fill='x', padx=8, pady=(8,0))
-        self.amp_btn = ttk.Button(tr_row, text='▶  START AMP', style='Go.TButton',
-                                   command=self._toggle_amp)
-        self.amp_btn.pack(side='left', ipadx=16)
-        self.amp_stat = tk.Label(tr_row, text='Stopped', bg=BG, fg=DIM,
-                                  font=(FF,11))
-        self.amp_stat.pack(side='left', padx=16)
-
-        inner = self._scrollable(root)
-
+    def _build_io_pages(self, pin, pout):
+        """The Input tile's page (audio input, input gain, noise gate, hum filter) and the Output tile's page (audio
+        output, levels, master volume), as cards."""
         # ── devices ──────────────────────────────────────────
-        dev_sec = self._sec(inner, 'Audio Devices',
-                             group=IO_ACCORDION_GROUP, default_collapsed=False)
+        dev_sec = self._pcard(pin, 'Audio input')
 
         # Host API filter — Windows reports the same physical device once per
         # API it's reachable through, so leaving this unfiltered turns a
@@ -3997,16 +4630,17 @@ class App(tk.Tk):
         self.tuner.device = next((i for i,l in self.t_inputs
                                    if l == self.t_dev_var.get()), None)
 
+        out_sec = self._pcard(pout, 'Audio output')
         self.amp_out_devs = list_outputs(self._current_host_api())
         self.amp_out_var = tk.StringVar(value=self.amp_out_devs[0][1])
-        r2 = tk.Frame(dev_sec, bg=PANEL); r2.pack(fill='x', padx=10, pady=5)
+        r2 = tk.Frame(out_sec, bg=PANEL); r2.pack(fill='x', padx=10, pady=5)
         tk.Label(r2, text='Output:', bg=PANEL, fg=FG,
                  font=(FF,11), width=9).pack(side='left')
         self.amp_out_box = ttk.Combobox(r2, textvariable=self.amp_out_var, state='readonly',
                                          width=48, values=[l for _,l in self.amp_out_devs])
         self.amp_out_box.pack(side='left', padx=4)
 
-        bs_row = tk.Frame(dev_sec, bg=PANEL); bs_row.pack(fill='x', padx=10, pady=5)
+        bs_row = tk.Frame(out_sec, bg=PANEL); bs_row.pack(fill='x', padx=10, pady=5)
         tk.Label(bs_row, text='Block size:', bg=PANEL, fg=FG,
                  font=(FF,11), width=9).pack(side='left')
         # 64/128 dropped: with a full NAM+IR chain loaded they don't keep up
@@ -4020,10 +4654,10 @@ class App(tk.Tk):
                  bg=PANEL, fg=DIM, font=(FF,10)).pack(side='left', padx=6)
 
         # ── levels ────────────────────────────────────────────
-        lvl_sec = self._sec(inner, 'Levels',
-                             group=IO_ACCORDION_GROUP, default_collapsed=True)
+        lvl_in = self._pcard(pin, 'Input level')
         self.in_gain_sl,  self.in_gain_val  = self._knob_row(
-            lvl_sec, 'Input Gain (dB)',  -12, 24,  0, self._set_in_gain)
+            lvl_in, 'Input Gain (dB)',  -12, 24,  0, self._set_in_gain)
+        lvl_sec = self._pcard(pout, 'Levels')
         self.out_gain_sl, self.out_gain_val = self._knob_row(
             lvl_sec, 'Output Gain (dB)', *OUT_GAIN_RANGE_DB, -6, self._set_out_gain)
         match_row = tk.Frame(lvl_sec, bg=PANEL); match_row.pack(fill='x', padx=10, pady=(0,4))
@@ -4039,8 +4673,7 @@ class App(tk.Tk):
                  bg=PANEL, fg=DIM, font=(FF,10), anchor='w').pack(fill='x', padx=10, pady=(0,6))
 
         # ── noise gate ───────────────────────────────────────
-        gate_sec = self._sec(inner, 'Noise Gate',
-                              group=IO_ACCORDION_GROUP, default_collapsed=True)
+        gate_sec = self._pcard(pin, 'Noise gate')
         self.gate_sl, self.gate_val = self._knob_row(
             gate_sec, 'Threshold',  0, 60, 40, self._set_gate,
             fmt=lambda v: f'{-v:.0f} dBFS')
@@ -4067,8 +4700,7 @@ class App(tk.Tk):
         self._gate_refresh_ui()
 
         # ── hum filter ────────────────────────────────────────
-        hum_sec = self._sec(inner, 'Hum Filter',
-                             group=IO_ACCORDION_GROUP, default_collapsed=True)
+        hum_sec = self._pcard(pin, 'Hum filter')
         hum_row = tk.Frame(hum_sec, bg=PANEL); hum_row.pack(fill='x', padx=10, pady=6)
         self.hum_var = tk.BooleanVar(value=False)
         self.hum_var.trace_add('write', lambda *_a: self._lpd8_refresh_leds())
@@ -4327,37 +4959,10 @@ class App(tk.Tk):
 
     # ── TAB 2: Signal Chain ───────────────────────────────────
 
-    def _tab_chain(self, root):
-        inner = self._scrollable(root)
-
-        # ── Profiles ─────────────────────────────────────────
-        prof_sec = self._sec(inner, f'Tone Profiles  (.{PROFILE_EXT.lstrip(".")} — NAM/IR + pedals + EQ + tuning)')
-        prof_row = tk.Frame(prof_sec, bg=PANEL); prof_row.pack(fill='x', padx=10, pady=6)
-        ttk.Button(prof_row, text='Save Profile…', command=self._save_profile).pack(side='left', padx=(0,4))
-        ttk.Button(prof_row, text='Load Profile…', command=self._load_profile).pack(side='left', padx=4)
-        self.profile_lbl = tk.Label(prof_row, text='No profile loaded', bg=PANEL, fg=DIM,
-                                     font=(FF,10))
-        self.profile_lbl.pack(side='left', padx=10)
-
-        # Free-text notes saved with the profile — which pickup/position,
-        # what the guitar's knobs should be set to, anything that can't be
-        # captured in the settings themselves. Editable: whatever is in the
-        # box when you Save Profile is what gets written.
-        tk.Label(prof_sec, text='Notes  (saved with the profile — pickup, guitar knobs, tips)',
-                 bg=PANEL, fg=DIM, font=(FF,9), anchor='w').pack(fill='x', padx=10)
-        notes_row = tk.Frame(prof_sec, bg=PANEL); notes_row.pack(fill='x', padx=10, pady=(2,8))
-        self.profile_notes = tk.Text(notes_row, height=5, wrap='word', bg=BG_WELL, fg=FG,
-                                      insertbackground=FG, relief='flat', font=(FF,10),
-                                      padx=8, pady=6, highlightthickness=1,
-                                      highlightbackground='#2c333b', highlightcolor=ACCENT,
-                                      undo=True)
-        notes_sb = ttk.Scrollbar(notes_row, orient='vertical', command=self.profile_notes.yview)
-        self.profile_notes.configure(yscrollcommand=notes_sb.set)
-        self.profile_notes.pack(side='left', fill='x', expand=True)
-        notes_sb.pack(side='left', fill='y')
-
+    def _build_amp_page(self, page):
+        """The Amp tile's page: the NAM model, the cabinet IRs and the EQ, as cards."""
         # ── NAM ──────────────────────────────────────────────
-        nam_sec = self._sec(inner, 'NAM Amp Model  (.nam — WaveNet)')
+        nam_sec = self._pcard(page, 'NAM amp model  (.nam, WaveNet)')
         nam_row = tk.Frame(nam_sec, bg=PANEL); nam_row.pack(fill='x', padx=10, pady=6)
         self.nam_lbl = tk.Label(nam_row, text='No file loaded', bg=PANEL, fg=DIM,
                                  font=(FF,11), width=36, anchor='w')
@@ -4376,7 +4981,7 @@ class App(tk.Tk):
         self.nam_info.pack(anchor='w', padx=10, pady=(0,4))
 
         # ── IR slots ─────────────────────────────────────────
-        ir_sec = self._sec(inner, 'Cabinet IRs  (up to 5 slots — A/B between any two)')
+        ir_sec = self._pcard(page, 'Cabinet IRs  (up to 5 slots, A/B between any two)')
         self.ir_active_var = tk.IntVar(value=-1)
         self.ir_ab_a = tk.IntVar(value=-1)
         self.ir_ab_b = tk.IntVar(value=-1)
@@ -4455,7 +5060,7 @@ class App(tk.Tk):
         # Horizontal row of vertical faders, like a hardware graphic EQ
         # pedal, rather than the old stacked horizontal-slider rows —
         # easier to eyeball the overall curve at a glance.
-        eq_sec = self._sec(inner, '5-Band EQ')
+        eq_sec = self._pcard(page, '5-band EQ')
         eq_hdr = tk.Frame(eq_sec, bg=PANEL); eq_hdr.pack(fill='x', padx=10, pady=(4,0))
         self.eq_on_var = tk.BooleanVar(value=True)
         self.eq_on_var.trace_add('write', lambda *_a: self._lpd8_refresh_leds())
@@ -4531,6 +5136,7 @@ class App(tk.Tk):
             'hum_on':        amp.hum.on,
             'hum_base_hz':   amp.hum.base,
             'pedals':        {f: getattr(amp.pedals, f) for f in PEDAL_PROFILE_FIELDS},
+            'scenes':        self._scene_dict(),
             'tuning':        self.tuning_var.get(),
             # Only the pedal-related slice of the live MIDI map — which
             # knob/pad drives which pedal is part of "this particular
@@ -4552,6 +5158,437 @@ class App(tk.Tk):
         slider.set(raw_value)
         self._updating = False
         val_var.set(text)
+
+    def _apply_eq_state(self, data):
+        """The EQ part of a profile or a scene: on/off, the five bands and the level (keys it lacks are left alone)."""
+        amp = self.amp
+        if 'eq_on' in data:
+            amp.eq_on = bool(data['eq_on'])
+            self.eq_on_var.set(amp.eq_on)
+        if 'eq_band_gains' in data:
+            for i, g in enumerate(data['eq_band_gains'][:len(self.eq_sliders)]):
+                with amp.lock: amp.eq.set_gain(i, float(g))
+                self._set_knob(self.eq_sliders[i], self.eq_val_vars[i],
+                                float(g), f'{float(g):+.0f} dB')
+        if 'eq_level' in data:
+            g = float(data['eq_level'])
+            with amp.lock: amp.eq.set_level(g)
+            self._set_knob(self.eq_level_sl, self.eq_level_val, g, f'{g:+.0f} dB')
+
+    def _apply_gain_state(self, data):
+        """The input and output gain of a profile or a scene."""
+        amp = self.amp
+        if 'in_gain' in data:
+            amp.in_gain = float(data['in_gain'])
+            v = 20.0 * math.log10(max(1e-9, amp.in_gain))
+            self._set_knob(self.in_gain_sl, self.in_gain_val, v, f'{v:+.1f} dB')
+        if 'out_gain' in data:
+            amp.out_gain = float(data['out_gain'])
+            v = 20.0 * math.log10(max(1e-9, amp.out_gain))
+            self._set_knob(self.out_gain_sl, self.out_gain_val, v, f'{v:+.1f} dB')
+
+    # ── scenes: four variations of the loaded profile ────────
+    # A scene keeps which pedals are on and every pedal setting, the EQ and the input/output gain (SCENE_PEDAL_FIELDS).
+    # The profile's own top-level values are always the active scene, so a profile saved before scenes existed is just
+    # "scene A" and a player who ignores scenes sees no change. Scenes live in memory while you play and are written
+    # with the profile (Save…). An empty scene starts as a copy of the one you are on, the way UltraRig does it.
+
+    def _scene_reset(self):
+        self._scenes = [None] * SCENE_COUNT
+        self._scene_names = [''] * SCENE_COUNT
+        self._scene_active = 0
+
+    def _scene_snapshot(self):
+        amp = self.amp
+        return {
+            'pedals':        {f: getattr(amp.pedals, f) for f in SCENE_PEDAL_FIELDS},
+            'eq_on':         amp.eq_on,
+            'eq_band_gains': [b['gain'] for b in amp.eq.bands],
+            'eq_level':      amp.eq.level_db,
+            'in_gain':       amp.in_gain,
+            'out_gain':      amp.out_gain,
+        }
+
+    def _scene_capture(self):
+        """Write what is on the pedals right now into the active scene's slot."""
+        self._scenes[self._scene_active] = self._scene_snapshot()
+
+    def _scene_dict(self):
+        self._scene_capture()
+        return {'active': self._scene_active, 'names': list(self._scene_names), 'slots': copy.deepcopy(self._scenes)}
+
+    def _scenes_from_profile(self, data):
+        """Read a profile's scenes block (the profile's own values were just applied, and are the active scene). A
+        profile without one, or with a damaged one, gets a single scene A."""
+        self._scene_reset()
+        blk = data.get('scenes')
+        if isinstance(blk, dict):
+            slots, names = blk.get('slots'), blk.get('names')
+            if isinstance(slots, list):
+                for i, sn in enumerate(slots[:SCENE_COUNT]):
+                    if isinstance(sn, dict) and isinstance(sn.get('pedals'), dict):
+                        self._scenes[i] = sn
+            if isinstance(names, list):
+                for i, nm in enumerate(names[:SCENE_COUNT]):
+                    if isinstance(nm, str):
+                        self._scene_names[i] = nm[:15]
+            act = blk.get('active')
+            if isinstance(act, int) and 0 <= act < SCENE_COUNT:
+                self._scene_active = act
+        self._scene_capture()
+        self._scene_refresh_ui()
+
+    def _scene_label(self, i):
+        return SCENE_LETTERS[i] + (f' · {self._scene_names[i]}' if self._scene_names[i] else '')
+
+    def _scene_select(self, i):
+        """Switch to scene i. What you changed in the scene you are leaving is kept; an empty scene starts as a copy."""
+        if not 0 <= i < SCENE_COUNT or i == self._scene_active:
+            return
+        _trail(f'scene {SCENE_LETTERS[self._scene_active]} -> {SCENE_LETTERS[i]}')
+        self._scene_capture()
+        if self._scenes[i] is None:
+            self._scenes[i] = copy.deepcopy(self._scenes[self._scene_active])
+        else:
+            self._scene_apply(self._scenes[i])
+        self._scene_active = i
+        self._scene_refresh_ui()
+
+    def _scene_step(self, delta):
+        self._scene_select((self._scene_active + delta) % SCENE_COUNT)
+
+    def _scene_apply(self, snap):
+        """Put a scene's values on the pedals. Switching a pedal on or off, or moving a slider, updates the open controls
+        in place (fast enough to do with a foot); a change to a mode or a choice rebuilds the pedal pages once (about a
+        second), since those controls need their whole page redrawn."""
+        p = self.amp.pedals
+        values = snap.get('pedals', {})
+        light, heavy = [], False
+        for f in SCENE_PEDAL_FIELDS:
+            new = values.get(f, PEDAL_FACTORY_VALUES[f])
+            if getattr(p, f) == new:
+                continue
+            entry = self._pedal_widgets.get(f)
+            if f.endswith('_on') and f[:-3] in self._pedal_on_vars:
+                light.append((f, new, None))
+            elif entry is not None and entry['kind'] == 'slider':
+                light.append((f, new, entry))
+            else:
+                heavy = True
+                setattr(p, f, new)
+        for f, new, entry in light:
+            if entry is None:
+                self._set_pedal_on(f[:-3], bool(new))
+            else:
+                setattr(p, f, new)
+                self._pedal_widget_sync(f, new)
+        if heavy:
+            self._rebuild_pedals_ui()
+        self._apply_eq_state(snap)
+        self._apply_gain_state(snap)
+
+    def _scene_refresh_ui(self):
+        btns = getattr(self, '_scene_btns', None)
+        if not btns:
+            return
+        for i, b in enumerate(btns):
+            state = 'active' if i == self._scene_active else ('full' if self._scenes[i] is not None else 'empty')
+            fg = ACCENT_DARK if state == 'active' else (FG if state == 'full' else DIM)
+            try:
+                if HAS_PIL:
+                    key = (state, ACCENT, BG, PANEL)
+                    ph = self._scene_imgs.get(key)
+                    if ph is None:
+                        fill, outline = {'active': (ACCENT, _scale_color(ACCENT, 0.6)), 'full': ('#2a343d', '#4a5a66'),
+                                         'empty': (PANEL, '#33404a')}[state]
+                        ph = ImageTk.PhotoImage(_button_asset_image((30, 24), 8, fill, outline, PANEL, 1))
+                        self._scene_imgs[key] = ph
+                        _UI_IMAGE_REFS.append(ph)
+                    b.configure(image=ph, width=30, height=24, fg=fg)
+                else:
+                    b.configure(fg=fg, bg=(ACCENT if state == 'active' else PANEL))
+            except tk.TclError:
+                pass
+
+    def _scene_menu(self, event, i):
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label=f'Rename scene {SCENE_LETTERS[i]}…', command=lambda: self._scene_rename(i))
+        m.add_command(label=f'Clear scene {SCENE_LETTERS[i]}', command=lambda: self._scene_clear(i),
+                      state=('disabled' if i == self._scene_active or self._scenes[i] is None else 'normal'))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _scene_rename(self, i):
+        name = simpledialog.askstring('Scene name', f'Name for scene {SCENE_LETTERS[i]} (up to 15 characters, empty for none):',
+                                      initialvalue=self._scene_names[i], parent=self)
+        if name is not None:
+            self._scene_names[i] = name.strip()[:15]
+            self._scene_refresh_ui()
+
+    def _scene_clear(self, i):
+        if i != self._scene_active:
+            self._scenes[i] = None
+            self._scene_names[i] = ''
+            self._scene_refresh_ui()
+
+    # ── AI tone building ─────────────────────────────────────
+    # Describe a sound in words; get pedal settings and up to four scenes. Two routes: Claude with the player's own API key,
+    # or "copy the prompt, paste the answer" with any chat AI. Either way the answer goes through ai_tone.clean() (every value
+    # clamped to its range, unknown fields dropped) before it touches the rig, and one click undoes it. Only the description,
+    # the rig's file names and the pedal settings' names and ranges are ever sent: no audio.
+
+    AI_KEY_FILE = pathlib.Path.home() / '.solotone_ai.json'
+    _AI_NAMES = {'comp': 'Compressor', 'wah': 'Wah', 'pitch': 'Pitch', 'fuzz': 'Fuzz', 'dist': 'Distortion', 'od': 'Overdrive',
+                 'phaser': 'Phaser', 'chorus': 'Chorus', 'tremolo': 'Tremolo', 'rotary': 'Rotary', 'delay': 'Delay',
+                 'reverb': 'Reverb'}
+
+    def _ai_spec(self):
+        return ai_tone.spec_from_widgets(self._pedal_widgets, PEDAL_FACTORY_VALUES, PEDAL_PROFILE_FIELDS)
+
+    def _ai_context(self):
+        nam = pathlib.Path(self._current_nam_path).stem if self._current_nam_path else 'none loaded (clean DI sound)'
+        irs = [pathlib.Path(p).stem for p in self._current_ir_paths if p]
+        return 'Amp capture: %s. Cab IR: %s.' % (nam, ', '.join(irs) if irs else 'none')
+
+    def _ai_load_key(self):
+        try:
+            d = json.loads(self.AI_KEY_FILE.read_text(encoding='utf-8'))
+            return str(d.get('key', '')), str(d.get('model', '')), True
+        except (OSError, ValueError):
+            pass
+        return os.environ.get('ANTHROPIC_API_KEY', ''), '', False
+
+    def _ai_save_key(self, key, model, remember):
+        try:
+            if remember and key:
+                self.AI_KEY_FILE.write_text(json.dumps({'key': key, 'model': model}), encoding='utf-8')
+                try:
+                    os.chmod(self.AI_KEY_FILE, 0o600)
+                except OSError:
+                    pass
+            elif self.AI_KEY_FILE.exists():
+                self.AI_KEY_FILE.unlink()
+        except OSError:
+            pass
+
+    def _ai_scene_lines(self, ans):
+        lines = []
+        for i, sc in enumerate(ans['scenes']):
+            on = [self._AI_NAMES[c] for c in ai_tone.PEDALS if sc['pedals'].get(c + '_on')]
+            extra = []
+            if sc['in_gain_db'] is not None:
+                extra.append('input %+.1f dB' % sc['in_gain_db'])
+            if sc['eq_bands_db'] is not None:
+                extra.append('EQ ' + ' '.join('%+.0f' % b for b in sc['eq_bands_db']))
+            lines.append('%s · %s: %s%s' % (SCENE_LETTERS[i], sc['name'] or '(unnamed)', ', '.join(on) or 'no pedals',
+                                           ('   (' + '; '.join(extra) + ')') if extra else ''))
+        return lines
+
+    def _ai_apply(self, ans):
+        """Put an answer (already cleaned) on the rig as scenes. The scenes it replaces are kept for Undo."""
+        self._scene_capture()
+        self._ai_undo = self._scene_dict()
+        cur = self._scene_snapshot()
+        slots, names = [None] * SCENE_COUNT, [''] * SCENE_COUNT
+        for i, sc in enumerate(ans['scenes'][:SCENE_COUNT]):
+            snap = {'pedals': dict(sc['pedals']), 'eq_on': True if sc['eq_bands_db'] is not None else cur['eq_on'],
+                    'eq_band_gains': list(sc['eq_bands_db']) if sc['eq_bands_db'] is not None else list(cur['eq_band_gains']),
+                    'eq_level': cur['eq_level'],
+                    'in_gain': 10 ** (sc['in_gain_db'] / 20.0) if sc['in_gain_db'] is not None else cur['in_gain'],
+                    'out_gain': 10 ** (sc['out_gain_db'] / 20.0) if sc['out_gain_db'] is not None else cur['out_gain']}
+            slots[i], names[i] = snap, sc['name']
+        self._scenes, self._scene_names, self._scene_active = slots, names, 0
+        self._scene_apply(slots[0])
+        self._scene_refresh_ui()
+
+    def _ai_restore(self):
+        d = getattr(self, '_ai_undo', None)
+        if not d:
+            return False
+        self._scenes, self._scene_names = copy.deepcopy(d['slots']), list(d['names'])
+        self._scene_active = d['active']
+        self._scene_apply(self._scenes[self._scene_active])
+        self._scene_refresh_ui()
+        self._ai_undo = None
+        return True
+
+    def _ai_open(self):
+        win = getattr(self, '_ai_win', None)
+        try:
+            if win is not None and win.winfo_exists():
+                win.lift()
+                win.focus_force()
+                return
+        except tk.TclError:
+            pass
+        win = self._ai_win = tk.Toplevel(self)
+        win.title('AI tone')
+        win.configure(bg=BG)
+        win.geometry('660x840')
+        win.transient(self)
+        pad = dict(padx=14)
+
+        def head(text, top=10):
+            tk.Label(win, text=text, bg=BG, fg=ACCENT, font=(FF, 10, 'bold'), anchor='w').pack(fill='x', pady=(top, 2), **pad)
+
+        def note(text):
+            tk.Label(win, text=text, bg=BG, fg=DIM, font=(FF, 8), anchor='w', justify='left', wraplength=600).pack(fill='x', **pad)
+
+        head('Describe the sound', 12)
+        want = tk.Text(win, height=3, bg=PANEL, fg=FG, insertbackground=FG, font=(FF, 10), wrap='word', bd=0, padx=6, pady=6)
+        want.pack(fill='x', **pad)
+        want.insert('1.0', 'Gilmour-style singing lead: sustaining, a little compressed, long delay and a lush plate reverb')
+        nscene = tk.IntVar(value=1)
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill='x', pady=(4, 0), **pad)
+        for v, t in [(1, 'One sound'), (4, 'Four scenes (A to D)')]:
+            tk.Radiobutton(row, text=t, variable=nscene, value=v, bg=BG, fg=FG, selectcolor='#2a3540', activebackground=BG,
+                           font=(FF, 9)).pack(side='left', padx=(0, 12))
+        note('Your amp capture and cab stay as they are; this builds the pedals, the EQ and the gain around them.')
+
+        status = tk.Label(win, text='', bg=BG, fg=DIM, font=(FF, 9), anchor='w', justify='left', wraplength=600)
+        pending = {'ans': None}
+        out = tk.Text(win, height=8, bg=PANEL, fg=FG, font=(FF, 9), wrap='word', bd=0, padx=6, pady=6, state='disabled')
+
+        def say(t, bad=False):
+            status.configure(text=t, fg=RED if bad else DIM)
+
+        def show(ans, notes):
+            pending['ans'] = ans
+            txt = [ans['summary'], ''] + self._ai_scene_lines(ans)
+            if notes:
+                txt += ['', 'Adjusted:'] + ['  ' + n for n in notes[:12]]
+            out.configure(state='normal')
+            out.delete('1.0', 'end')
+            out.insert('1.0', '\n'.join(txt))
+            out.configure(state='disabled')
+            apply_btn.configure(state='normal')
+            say('Ready. Apply puts it on the rig (Undo brings the old scenes back).')
+
+        def request_text():
+            t = want.get('1.0', 'end').strip()
+            if not t:
+                say('Describe the sound first.', bad=True)
+            return t
+
+        # route 2: any chat AI
+        head('Use any chat AI (free, no key)', 14)
+        note('Copy the prompt, paste it into Claude.ai, ChatGPT, Gemini or any chat you already use, then paste its answer below. '
+             'No account with this program, nothing extra to pay.')
+
+        def copy_prompt():
+            req = request_text()
+            if not req:
+                return
+            text = ai_tone.build_prompt(req, self._ai_spec(), self._ai_context(), nscene.get())
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            say('Prompt copied (%d characters). Paste it into your AI, then paste its answer below.' % len(text))
+        ttk.Button(win, text='Copy prompt', command=copy_prompt).pack(anchor='w', pady=(2, 4), **pad)
+        paste = tk.Text(win, height=3, bg=PANEL, fg=FG, insertbackground=FG, font=(FF, 9), wrap='char', bd=0, padx=6, pady=6)
+        paste.pack(fill='x', **pad)
+
+        def use_pasted():
+            try:
+                spec = self._ai_spec()
+                show(*ai_tone.clean(ai_tone.parse_reply(paste.get('1.0', 'end')), spec))
+            except ValueError as e:
+                say(str(e), bad=True)
+        ttk.Button(win, text='Use pasted answer', command=use_pasted).pack(anchor='w', pady=(4, 0), **pad)
+
+        # route 1: Claude
+        head('Advanced: ask Claude directly (API key, billed separately)', 14)
+        key0, model0, remembered = self._ai_load_key()
+        kv, mv, rv = tk.StringVar(value=key0), tk.StringVar(value=model0 or ai_tone.DEFAULT_MODEL), tk.BooleanVar(value=remembered)
+        r1 = tk.Frame(win, bg=BG)
+        r1.pack(fill='x', **pad)
+        tk.Label(r1, text='API key', bg=BG, fg=FG, font=(FF, 9), width=9, anchor='w').pack(side='left')
+        tk.Entry(r1, textvariable=kv, show='•', bg=PANEL, fg=FG, insertbackground=FG, bd=0, font=(FF, 9)).pack(
+            side='left', fill='x', expand=True, ipady=3)
+        r2 = tk.Frame(win, bg=BG)
+        r2.pack(fill='x', pady=(3, 0), **pad)
+        tk.Label(r2, text='Model', bg=BG, fg=FG, font=(FF, 9), width=9, anchor='w').pack(side='left')
+        tk.Entry(r2, textvariable=mv, bg=PANEL, fg=FG, insertbackground=FG, bd=0, font=(FF, 9), width=24).pack(side='left', ipady=3)
+        tk.Checkbutton(r2, text='Remember the key on this computer', variable=rv, bg=BG, fg=FG, selectcolor='#2a3540',
+                       activebackground=BG, font=(FF, 9)).pack(side='left', padx=12)
+        note('This uses the Anthropic API, which is billed per use to an Anthropic Console account and is separate from any Claude '
+             'subscription. It is optional: the chat route above does the same thing for free. Your key is sent only to '
+             'api.anthropic.com. If you tick "Remember", it is saved as plain text in your user folder (.solotone_ai.json); '
+             'untick it to delete that file. Only your description, the amp and cab file names and the pedal settings names '
+             'and ranges are sent, never audio. The default model is the smallest and cheapest; a larger one may choose better.')
+        q = queue.Queue()
+
+        def ask():
+            req = request_text()
+            if not req:
+                return
+            key = kv.get().strip()
+            self._ai_save_key(key, mv.get().strip(), rv.get())
+            ask_btn.configure(state='disabled')
+            apply_btn.configure(state='disabled')
+            say('Asking Claude…')
+            spec, ctx, n, model = self._ai_spec(), self._ai_context(), nscene.get(), mv.get().strip()
+
+            def work():
+                try:
+                    q.put(('ok', ai_tone.clean(ai_tone.ask_claude(key, req, spec, ctx, n, model), spec)))
+                except (ai_tone.AIError, ValueError) as e:
+                    q.put(('err', str(e)))
+                except Exception as e:
+                    q.put(('err', 'Unexpected problem: %s' % e))
+            threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            try:
+                if not win.winfo_exists():
+                    return
+                try:
+                    kind, val = q.get_nowait()
+                except queue.Empty:
+                    win.after(150, poll)
+                    return
+                ask_btn.configure(state='normal')
+                if kind == 'ok':
+                    show(*val)
+                else:
+                    say(val, bad=True)
+                win.after(150, poll)
+            except tk.TclError:
+                pass
+        ask_btn = ttk.Button(win, text='Ask Claude', command=ask)
+        ask_btn.pack(anchor='w', pady=(6, 0), **pad)
+
+        # the result
+        head('Result', 14)
+        status.pack(fill='x', **pad)
+        out.pack(fill='x', pady=(4, 0), **pad)
+        brow = tk.Frame(win, bg=BG)
+        brow.pack(fill='x', pady=(6, 0), **pad)
+
+        def do_apply():
+            ans = pending['ans']
+            if not ans:
+                return
+            try:
+                self._ai_apply(ans)
+            except Exception as e:
+                say('Could not apply it: %s' % e, bad=True)
+                return
+            undo_btn.configure(state='normal')
+            say('Applied: %d scene(s) on the rig. Switch scenes with A to D at the top.' % len(ans['scenes']))
+        apply_btn = ttk.Button(brow, text='Apply to rig', command=do_apply, state='disabled')
+        apply_btn.pack(side='left')
+
+        def do_undo():
+            if self._ai_restore():
+                undo_btn.configure(state='disabled')
+                say('Undone: your previous scenes are back.')
+        undo_btn = ttk.Button(brow, text='Undo', command=do_undo, state='normal' if getattr(self, '_ai_undo', None) else 'disabled')
+        undo_btn.pack(side='left', padx=8)
+        ttk.Button(brow, text='Close', command=win.destroy).pack(side='right')
+        win.after(150, poll)
 
     def _apply_profile(self, data, path):
         """Apply a loaded profile dict to the app. A profile is a whole
@@ -4588,18 +5625,7 @@ class App(tk.Tk):
             amp.ir_active = ir_active
             self.ir_active_var.set(ir_active)
 
-        if 'eq_on' in data:
-            amp.eq_on = bool(data['eq_on'])
-            self.eq_on_var.set(amp.eq_on)
-        if 'eq_band_gains' in data:
-            for i, g in enumerate(data['eq_band_gains'][:len(self.eq_sliders)]):
-                with amp.lock: amp.eq.set_gain(i, float(g))
-                self._set_knob(self.eq_sliders[i], self.eq_val_vars[i],
-                                float(g), f'{float(g):+.0f} dB')
-        if 'eq_level' in data:
-            g = float(data['eq_level'])
-            with amp.lock: amp.eq.set_level(g)
-            self._set_knob(self.eq_level_sl, self.eq_level_val, g, f'{g:+.0f} dB')
+        self._apply_eq_state(data)
 
         if 'gate_threshold' in data:
             thr = max(1e-9, float(data['gate_threshold']))
@@ -4623,14 +5649,7 @@ class App(tk.Tk):
             self._gate_widget_set(attr, val)
         self._gate_refresh_ui()
 
-        if 'in_gain' in data:
-            amp.in_gain = float(data['in_gain'])
-            v = 20.0 * math.log10(max(1e-9, amp.in_gain))
-            self._set_knob(self.in_gain_sl, self.in_gain_val, v, f'{v:+.1f} dB')
-        if 'out_gain' in data:
-            amp.out_gain = float(data['out_gain'])
-            v = 20.0 * math.log10(max(1e-9, amp.out_gain))
-            self._set_knob(self.out_gain_sl, self.out_gain_val, v, f'{v:+.1f} dB')
+        self._apply_gain_state(data)
 
         if 'hum_on' in data:
             amp.hum.on = bool(data['hum_on'])
@@ -4682,6 +5701,7 @@ class App(tk.Tk):
 
         if 'tuning' in data:
             self._restore_tuning(data['tuning'])
+        self._scenes_from_profile(data)
 
         notes = data.get('notes')
         self.profile_notes.delete('1.0', 'end')
@@ -4690,7 +5710,7 @@ class App(tk.Tk):
 
         name = data.get('name') or pathlib.Path(path).stem
         self._current_profile_path = path
-        self.profile_lbl.configure(text=f'Profile: {name}', fg=FG)
+        self._set_profile_label(name)
 
         if missing:
             missing_str = '\n'.join(f'  • {m}' for m in missing)
@@ -4699,7 +5719,7 @@ class App(tk.Tk):
                 f'"{name}" refers to files that could not be found:\n\n'
                 f'{missing_str}\n\n'
                 f'Everything else in the profile was loaded; load the missing '
-                f'file(s) manually from the Signal Chain tab if you have them '
+                f'file(s) manually from the Amp page on the Rig tab if you have them '
                 f'elsewhere.'
             )
 
@@ -4722,7 +5742,7 @@ class App(tk.Tk):
             messagebox.showerror('Save failed', str(e))
             return
         self._current_profile_path = path
-        self.profile_lbl.configure(text=f'Profile: {name}', fg=FG)
+        self._set_profile_label(name)
 
     def _load_profile(self):
         path = filedialog.askopenfilename(
@@ -4730,6 +5750,10 @@ class App(tk.Tk):
             initialdir=(self._last_profile_dir or str(PROFILE_DIR)),
             filetypes=[('SoloTone Profile', f'*{PROFILE_EXT}'), ('All files', '*.*')])
         if not path: return
+        self._load_profile_path(path)
+
+    def _load_profile_path(self, path):
+        _trail(f'load profile {path}')
         self._last_profile_dir = str(pathlib.Path(path).parent)
         try:
             with open(path) as f:
@@ -5093,7 +6117,7 @@ class App(tk.Tk):
             return True
         if not self.amp.running:
             messagebox.showinfo('Start the amp first',
-                                'Press START AMP on the I/O & Levels tab, then record.')
+                                'Press START AMP (top left), then record.')
             return False
         if not self._rec_dir:
             if self._rec_choose_folder() is None:
@@ -5403,10 +6427,14 @@ class App(tk.Tk):
         self._tg_ports = {f'{dev}   {desc}' + ('   (Tank-G)' if pedal else ''): dev for dev, desc, pedal in ports}
         labels = list(self._tg_ports)
         self.tg_port_box.configure(values=labels)
+        pedal = next((l for l in labels if l.endswith('(Tank-G)')), None)
+        cur = self.tg_port_var.get()
+        if pedal and not cur.endswith('(Tank-G)'):
+            self.tg_port_var.set(pedal)             # the pedal is there: never stay on COM1 or a Bluetooth port
+            return
         want = self._tg_port_device() or self._tg_saved_port
         if not (want and self._tg_select_port(want)):
-            pedal = next((l for l in labels if l.endswith('(Tank-G)')), labels[0] if labels else '')
-            self.tg_port_var.set(pedal)
+            self.tg_port_var.set(pedal or (labels[0] if labels else ''))
 
     def _tg_fill_slots(self):
         api = self._tankg
@@ -5440,6 +6468,7 @@ class App(tk.Tk):
     def _tg_status(self, text, bad=False):
         try: self.tg_status_lbl.configure(text=text, fg=RED if bad else FG)
         except tk.TclError: pass
+        self._lib_tg_say(text, bad)             # the Library page shows the same line next to its button
 
     def _tg_logline(self, text):
         try:
@@ -5583,6 +6612,213 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         self.after(100, self._tg_poll)
+
+    # ── Tank-G live mode ─────────────────────────────────────
+    # SoloTone as the remote of the pedal: the profile is played on the pedal's LIVE chain (nothing is stored in its memory,
+    # no preset and no library slot is touched) and from then on every change you make here (a pedal on or off, a knob, the
+    # EQ or gains, a scene A to D) is sent as it happens. A different capture, cab IR, chain order, gate or hum filter needs
+    # the sound sent again, which happens by itself. Only the serial port is used, no USB audio. The pedal's own footswitches
+    # still do what their layout says (the factory layout loads presets, which replaces the live sound).
+
+    def _fork_paint(self, hover=False):
+        c = self.fork
+        col = '#3fd0c0' if self._tuner_on else (FG if hover else DIM)
+        if not getattr(self, '_fork_items', None):                                  # drawn once, then only recoloured
+            self._fork_items = (
+                c.create_line(9, 4, 9, 13, width=2, capstyle='round'),              # two prongs
+                c.create_line(17, 4, 17, 13, width=2, capstyle='round'),
+                c.create_arc(9, 8, 17, 18, start=180, extent=180, style='arc', width=2),   # the U at their foot
+                c.create_line(13, 18, 13, 23, width=2, capstyle='round'))           # handle
+        for i, it in enumerate(self._fork_items):
+            c.itemconfigure(it, **({'outline': col} if i == 2 else {'fill': col}))
+
+    def _tuner_toggle(self):
+        api = self._tankg
+        if api is None:
+            return
+        on = not self._tuner_on
+        try:
+            ref = int(self.a4_lbl.cget('text'))
+        except (ValueError, tk.TclError):
+            ref = 440
+        if self._live_state == 'live':
+            self._live_q.put(('tuner', on, ref))
+        elif self._live_state in ('off', 'error') and not getattr(self, '_tg_busy', False):
+            self._tg_refresh_ports()
+            dev = self._tg_port_device()
+            if not dev or not self.tg_port_var.get().endswith('(Tank-G)'):
+                self._live_say('No Tank-G found. Plug it in and close the UltraRig page.', bad=True)
+                return
+
+            def run():
+                try:
+                    api.tuner(dev, on, ref)
+                except Exception as e:
+                    self._live_ev.put(('tunerr', str(e)))
+            threading.Thread(target=run, daemon=True).start()
+        else:
+            return                                  # sending or stopping: the port is busy
+        self._tuner_on = on
+        self._fork_paint()
+
+    def _live_toggle(self):
+        if self._live_state in ('off', 'error'):
+            self._live_start()
+        elif self._live_state == 'live':
+            self._live_stop()
+
+    def _live_say(self, text, bad=False):
+        try:
+            if bad or self._live_state != 'live':
+                self.live_lbl.configure(text=text, fg=RED if bad else FG)
+        except (tk.TclError, AttributeError):
+            pass
+        self._lib_tg_say(text, bad)
+
+    def _live_paint(self):
+        st = self._live_state
+        label = {'off': 'Go live', 'starting': 'Sending…', 'live': 'LIVE', 'stopping': 'Stopping…', 'error': 'Retry'}[st]
+        try:
+            self.live_btn.configure(text=label, fg={'live': '#ff5a5a', 'error': RED}.get(st, FG))
+            self.live_lbl.configure(text={'off': '', 'starting': 'sending', 'live': '', 'stopping': '', 'error': 'stopped'}[st],
+                                    fg=DIM if st != 'error' else RED)
+            bulb, glow = {'live': ('#ff2a2a', '#5a1414'), 'starting': ('#e0a030', '#4a3410'), 'stopping': ('#e0a030', '#4a3410')
+                          }.get(st, ('#3a2024', ''))
+            self.live_light.itemconfigure(self._live_bulb, fill=bulb)
+            self.live_light.itemconfigure(self._live_glow, fill=glow)
+            self.live_light.tag_lower(self._live_glow)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _live_sig_now(self):
+        """What a live session cannot change on the pedal: the capture, the cab IR, the chain order, the gate and the hum filter."""
+        a = self.amp
+        return (self._current_nam_path, tuple(self._current_ir_paths), a.ir_active, tuple(a.pedals.order), a.gate_mode,
+                round(float(a.gate_thr), 6), bool(a.hum.on), a.hum.base)
+
+    def _live_start(self):
+        api = self._tankg
+        ok, why = api.available()
+        if not ok:
+            self._live_say(why, bad=True)
+            return
+        if getattr(self, '_tg_busy', False):
+            return
+        # Nothing to play yet: a pedal board with no amp capture, or nothing loaded and nothing switched on
+        pedals_on = any(getattr(self.amp.pedals, f) for f in PEDAL_PROFILE_FIELDS if f.endswith('_on'))
+        if not self._current_nam_path:
+            self._live_say('Load a profile or an amp capture first: there is no amp model to play on the pedal.', bad=True)
+            return
+        if not self._current_profile_path and not pedals_on:
+            self._live_say('Load a profile (or switch some pedals on) first: nothing is set up to play.', bad=True)
+            return
+        self._tg_refresh_ports()
+        dev = self._tg_port_device()
+        if not dev or not self.tg_port_var.get().endswith('(Tank-G)'):
+            dev = None
+            self._live_state = 'error'
+            self._live_paint()
+            self._live_say('No Tank-G found. Plug it in and close the UltraRig page.', bad=True)
+            return
+        profile = self._gather_profile_dict(self._rec_profile_name() if self._current_profile_path else 'SoloTone')
+        self._live_state = 'starting'
+        self._live_sig, self._live_last, self._live_seen = self._live_sig_now(), self._scene_snapshot(), None
+        while not self._live_q.empty():
+            self._live_q.get_nowait()
+        self._live_paint()
+        self._tg_set_busy(True, 'Tank-G live mode is on: stop it to use this tab. Sending the sound…')
+        threading.Thread(target=self._live_worker, args=(dev, profile), daemon=True).start()
+
+    def _live_worker(self, dev, profile):
+        ses = None
+        try:
+            ses = self._tankg.LiveSession(dev, audio_loader=ir_to_48k_mono, log=lambda s: self._tg_q.put(('log', s)),
+                                          progress=lambda f, s='': self._tg_q.put(('prog', f, s)))
+            ses.start(profile)
+            self._live_ev.put(('live', dev))
+            while True:
+                item = self._live_q.get()
+                while not self._live_q.empty() and item[0] == 'sync':       # only the latest state matters
+                    nxt = self._live_q.get_nowait()
+                    if nxt[0] != 'sync':
+                        ses.sync(item[1])
+                    item = nxt
+                if item[0] == 'stop':
+                    break
+                if item[0] == 'tuner':
+                    try:
+                        ses.tuner(item[1], item[2])
+                    except Exception as e:
+                        self._live_ev.put(('tunerr', str(e)))
+                    continue
+                ses.sync(item[1])
+        except Exception as e:
+            self._live_ev.put(('err', str(e)))
+        finally:
+            if ses is not None:
+                try:
+                    ses.close()
+                except Exception:
+                    pass
+            self._live_ev.put(('ended',))
+
+    def _live_stop(self, restart=False):
+        if self._live_state in ('off', 'error'):
+            return
+        self._live_restart = restart
+        self._live_state = 'stopping'
+        self._live_paint()
+        self._live_q.put(('stop',))
+
+    def _live_tick(self):
+        try:
+            while True:
+                try:
+                    ev = self._live_ev.get_nowait()
+                except queue.Empty:
+                    break
+                if ev[0] == 'live':
+                    self._live_state = 'live'
+                    self._live_paint()
+                    self._live_say('Live on ' + ev[1] + '. Nothing is stored on the pedal.')
+                    self._tg_status('Tank-G live mode is on: stop it to use this tab.')
+                elif ev[0] == 'tunerr':
+                    self._tuner_on = False
+                    self._fork_paint()
+                    self._live_say('Tuner: ' + ev[1], bad=True)
+                elif ev[0] == 'err':
+                    self._live_state = 'error'
+                    self._live_paint()
+                    self._live_say(ev[1], bad=True)
+                    self._tg_logline('Live mode stopped: ' + ev[1])
+                elif ev[0] == 'ended':
+                    failed = self._live_state == 'error'
+                    if not failed:
+                        self._live_state = 'off'
+                    self._tg_set_busy(False)
+                    self._live_paint()
+                    if failed:
+                        self._tg_status('Live mode stopped.', bad=True)
+                    elif self._live_restart:
+                        self._live_restart = False
+                        self._live_start()
+                    else:
+                        self._live_say('')
+            if self._live_state == 'live':
+                if self._live_sig_now() != self._live_sig:
+                    self._live_say('New capture, cab or chain: sending the sound again…')
+                    self._live_stop(restart=True)
+                else:
+                    snap = self._scene_snapshot()
+                    if snap != self._live_last:
+                        if snap == self._live_seen:                       # unchanged for one tick: send it
+                            self._live_last = snap
+                            self._live_q.put(('sync', self._gather_profile_dict(
+                                self._rec_profile_name() if self._current_profile_path else 'SoloTone')))
+                        self._live_seen = snap
+        except tk.TclError:
+            pass
+        self.after(150, self._live_tick)
 
     # ── re-amp ───────────────────────────────────────────────
 
@@ -5793,7 +7029,7 @@ class App(tk.Tk):
         self.layer_list = tk.Frame(lf, bg=PANEL); self.layer_list.pack(fill='x', padx=8, pady=(0,8))
 
         self.loop_amp_notice = tk.Label(root,
-            text='⚠  Start the Amp (I/O & Levels tab) to enable the looper',
+            text='⚠  Start the amp (top left) to enable the looper',
             bg=BG, fg='#ffd166', font=(FF,10))
         self.loop_amp_notice.pack(pady=4)
 
@@ -5834,7 +7070,7 @@ class App(tk.Tk):
     def _loop_rec(self):
         if not self.amp.running:
             messagebox.showinfo('Amp not running',
-                'Start the Amp on the I/O & Levels tab first.')
+                'Start the amp (top left) first.')
             return
         self.looper.arm()
 
@@ -6044,7 +7280,15 @@ class App(tk.Tk):
     # ── TAB: Settings ────────────────────────────────────────
 
     def _tab_settings(self, root):
-        inner = self._scrollable(root)
+        items = [('controls', 'Keybinds and MIDI'), ('look', 'Window and appearance')]
+        if self._tankg is not None:
+            items.append(('tankg', 'Tank-G'))
+        pages = self._stacked_pages(root, items, '_settings_sel')
+        self._settings_pages = pages
+        inner = self._scrollable(pages['controls'])
+        inner_look = self._scrollable(pages['look'])
+        if 'tankg' in pages:
+            self._tab_tankg(pages['tankg'])
 
         # ── Keybinds ─────────────────────────────────────────
         # Generic keyboard "Learn" mapping — mirrors the MIDI Controller
@@ -6099,7 +7343,7 @@ class App(tk.Tk):
             self.keybind_rows[t['id']] = map_lbl
 
         # ── Window ───────────────────────────────────────────
-        win_sec = self._sec(inner, 'Window')
+        win_sec = self._sec(inner_look, 'Window')
         self.always_on_top_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(win_sec, text='Keep window always on top',
                          variable=self.always_on_top_var,
@@ -6113,7 +7357,7 @@ class App(tk.Tk):
                          ).pack(anchor='w', padx=10, pady=(0,6))
 
         # ── Appearance ───────────────────────────────────────
-        appear_sec = self._sec(inner, 'Appearance')
+        appear_sec = self._sec(inner_look, 'Appearance')
         tk.Label(appear_sec,
                  text='Changing either color rebuilds the whole window '
                       'right away — the tab you’re on stays selected.',
@@ -7116,7 +8360,7 @@ class App(tk.Tk):
                 'Files not found',
                 f'The following files from your last session could not be found:\n\n'
                 f'{missing_str}\n\n'
-                f'They may have been moved or deleted. Load them manually from the Signal Chain tab.'
+                f'They may have been moved or deleted. Load them manually from the Amp page on the Rig tab.'
             )
 
     def _save_session(self):
@@ -7179,17 +8423,52 @@ class App(tk.Tk):
 
     # ── Pedals tab: the board (chain + inactive tray) on top, an IDE-style inspector docked below ──
 
-    def _mini_btn(self, parent, text, command, **kw):
-        """A small flat button (a Label with button behaviour), compact enough for the inspector."""
-        b = tk.Label(parent, text=text, bg='#262626', fg=FG, font=(FF, 9), padx=6, pady=1, cursor='hand2',
-                     highlightthickness=1, highlightbackground='#3a3a3a', disabledforeground='#555555', **kw)
+    _mini_imgs = {}
+    _fonts = {}
+
+    @classmethod
+    def _text_width(cls, font, text):
+        f = cls._fonts.get(font)
+        if f is None:
+            f = cls._fonts[font] = tkfont.Font(font=font)
+        return f.measure(text)
+
+    def _mini_btn(self, parent, text, command, width_px=None, **kw):
+        """A small rounded button (a Label with button behaviour), compact enough for the inspector and the top bar."""
+        font = (FF, 9)
+        try:
+            bgc = parent.cget('bg')
+        except tk.TclError:
+            bgc = BG
+        try:
+            w = width_px or (self._text_width(font, text) + 22)
+        except tk.TclError:
+            w = width_px or 70
+        h = 22
+        b = tk.Label(parent, text=text, bg=bgc, fg=FG, font=font, bd=0, padx=0, pady=0, cursor='hand2',
+                     compound='center', disabledforeground='#5a6068', **kw)
+        if HAS_PIL:
+            def img(fill, outline):
+                key = (w, h, bgc, fill, outline)
+                ph = App._mini_imgs.get(key)
+                if ph is None:
+                    ph = ImageTk.PhotoImage(_button_asset_image((w, h), 7, fill, outline, bgc, 1))
+                    App._mini_imgs[key] = ph
+                    _UI_IMAGE_REFS.append(ph)
+                return ph
+            normal, hover = img('#242b32', '#38434d'), img('#2e3740', '#4a5a66')
+            b.configure(image=normal, width=w, height=h)
+        else:
+            normal = hover = None
+            b.configure(bg='#262626', padx=6, pady=1, highlightthickness=1, highlightbackground='#3a3a3a')
 
         def _click(_e):
             if str(b.cget('state')) != 'disabled':
                 command()
         b.bind('<Button-1>', _click)
-        b.bind('<Enter>', lambda e: b.configure(bg='#333333') if str(b.cget('state')) != 'disabled' else None)
-        b.bind('<Leave>', lambda e: b.configure(bg='#262626'))
+        b.bind('<Enter>', lambda e: (b.configure(image=hover) if hover is not None else b.configure(bg='#333333'))
+               if str(b.cget('state')) != 'disabled' else None)
+        b.bind('<Leave>', lambda e: (b.configure(image=normal) if normal is not None else b.configure(bg='#262626')))
         return b
 
     def _bind_wheel(self, canvas):
@@ -7214,34 +8493,35 @@ class App(tk.Tk):
                 w = getattr(w, 'master', None)
         self.bind_all('<MouseWheel>', _wheel, add='+')
 
-    def _pedal_page(self, code):
-        """One pedal's page in the inspector: a header row (on/off, presets, position) and a flow of control cards."""
+    def _pedal_page(self, code, static=False):
+        """One page in the inspector: for a pedal, a header row (on/off, presets, position); either way a flow of control
+        cards. The static pages (input, amp, output) have no header."""
         page = tk.Frame(self._insp_body, bg=BG)
-        page.head = tk.Frame(page, bg=BG)
-        page.head.pack(fill='x', padx=8, pady=(6, 2))
+        if not static:
+            page.head = tk.Frame(page, bg=BG)
+            page.head.pack(fill='x', padx=8, pady=(6, 2))
         page.flow = _FlowFrame(page, BG)
-        page.flow.pack(fill='x', padx=8, pady=(2, 6))
-        self._pedal_pages[code] = page
+        page.flow.pack(fill='x', padx=8, pady=(6 if static else 2, 6))
+        (self._static_pages if static else self._pedal_pages)[code] = page
         return page
 
     def _pcard(self, page, title):
         """A titled group of controls inside a pedal's page."""
-        card = tk.Frame(page.flow, bg=PANEL, highlightthickness=1, highlightbackground='#2e2e2e')
-        tk.Label(card, text=title, bg=PANEL, fg=ACCENT, font=(FF, 9, 'bold'), anchor='w').pack(fill='x', padx=8, pady=(4, 1))
-        page.flow.add(card)
+        card = self._card(page.flow, title, nested=False, pad=(8, 6))
+        page.flow.add(card.outer)
         return card
 
     def _tab_pedals(self, root):
         self._pedal_widgets = {}   # attr name -> {'kind': 'slider'|'radio', 'widget', 'val_var', 'fmt'}, for _pedal_widget_sync()
         self._fx_rows = {}         # name -> {pos_var, up, down, side}, for the position row
         self._pedal_pages = {}     # code -> that pedal's page in the inspector
+        self._static_pages = {}    # 'input' / 'amp' / 'output' -> their pages: built once, never rebuilt
         self._wheel_canvases = []
         # code -> on/off BooleanVar. _update_pedal_led() reads the var rather than amp.pedals.<code>_on, because a
         # MIDI toggle sets the var *before* it updates the attribute (see _midi_toggle_action).
         self._pedal_on_vars = {}
         if not hasattr(self, '_insp_open'):
-            self._insp_open, self._insp_sel, self._insp_h, self._insp_max = [], None, 260, False
-        p = self.amp.pedals
+            self._insp_open, self._insp_sel, self._insp_h, self._insp_max = ['amp'], 'amp', 260, False
 
         # ── containers: a vertical splitter, board above, inspector below (only present while a pedal is open) ──
         paned = tk.PanedWindow(root, orient='vertical', sashwidth=7, sashrelief='flat', bd=0, bg=BG, opaqueresize=True)
@@ -7269,7 +8549,7 @@ class App(tk.Tk):
                  bg='#171717', fg=DIM, font=(FF, 8)).pack(side='left')
         acts = tk.Frame(hdr, bg='#171717')
         acts.pack(side='right', padx=4, pady=3)
-        self._insp_max_btn = self._mini_btn(acts, 'Maximize', self._insp_toggle_max)
+        self._insp_max_btn = self._mini_btn(acts, 'Maximize', self._insp_toggle_max, width_px=72)
         self._insp_max_btn.pack(side='left', padx=2)
         self._mini_btn(acts, '✕', self._insp_close_all).pack(side='left', padx=2)
         body = tk.Frame(insp, bg=BG)
@@ -7277,6 +8557,24 @@ class App(tk.Tk):
         self._insp_body = self._scrollable(body, autohide=True)
         self._bind_wheel(self._insp_body.master)
         paned.bind('<Configure>', lambda e: self._insp_fit_later())
+
+        # the Input, Amp and Output pages hold the audio settings: built once here, while the pedal pages and the board
+        # below are rebuilt whenever a profile is loaded
+        for code in ('input', 'amp', 'output'):
+            self._pedal_page(code, static=True)
+        self._build_io_pages(self._static_pages['input'], self._static_pages['output'])
+        self._build_amp_page(self._static_pages['amp'])
+        self._build_pedal_content()
+
+    def _build_pedal_content(self):
+        """The pedal pages and the board. Read from the pedals' live values, so calling this again after a profile load
+        brings every control in line."""
+        self._pedal_widgets = {}
+        self._fx_rows = {}
+        self._pedal_pages = {}
+        self._pedal_on_vars = {}
+        p = self.amp.pedals
+        board_inner = self._board_inner
 
         def on_off(head, attr, label_text):
             """(frame, on_var) for a pedal's Enabled checkbox. The default is the pedal's live state, so rebuilding
@@ -7309,7 +8607,7 @@ class App(tk.Tk):
             sl.pack(side='left', padx=4, fill='x', expand=True)
             tk.Label(row, textvariable=vv, bg=PANEL, fg=DIM, font=(FF, 9), width=7, anchor='w').pack(side='left')
             if attr:
-                self._pedal_widgets[attr] = dict(kind='slider', widget=sl, val_var=vv, fmt=fmt)
+                self._pedal_widgets[attr] = dict(kind='slider', widget=sl, val_var=vv, fmt=fmt, lo=lo, hi=hi, label=label)
             return sl
 
         def _radio_row(parent, label, options, attr, default):
@@ -7323,7 +8621,7 @@ class App(tk.Tk):
                                activebackground=PANEL, font=(FF, 9), pady=0,
                                command=lambda a=attr, vv=v: setattr(self.amp.pedals, a, vv.get())
                                ).pack(side='left', padx=3)
-            self._pedal_widgets[attr] = dict(kind='radio', widget=v)
+            self._pedal_widgets[attr] = dict(kind='radio', widget=v, options=[(o, t) for o, t in options])
             return v
 
         def _note(parent, text):
@@ -7448,6 +8746,26 @@ class App(tk.Tk):
             fmt=lambda v: f'{int(v*100)}%', attr='od_vol')
 
         # ── Phaser ───────────────────────────────────────────
+        pg = self._pedal_page('pitch')
+        self.pitch_var = _head(pg, 'pitch', 'Enabled')
+        c = self._pcard(pg, 'Voice 1')
+        _sl(c, 'Interval (semitones)', -12, 12, p.pitch_semi,
+            lambda v: setattr(self.amp.pedals, 'pitch_semi', int(round(v))),
+            fmt=lambda v: f'{int(round(v)):+d}', attr='pitch_semi')
+        _sl(c, 'Fine tune (cents)', -50, 50, p.pitch_cents,
+            lambda v: setattr(self.amp.pedals, 'pitch_cents', int(round(v))),
+            fmt=lambda v: f'{int(round(v)):+d}', attr='pitch_cents')
+        c = self._pcard(pg, 'Voice 2')
+        _sl(c, 'Interval (semitones)', -12, 12, p.pitch_semi2,
+            lambda v: setattr(self.amp.pedals, 'pitch_semi2', int(round(v))),
+            fmt=lambda v: f'{int(round(v)):+d}', attr='pitch_semi2')
+        _sl(c, 'Level', 0.0, 1.0, p.pitch_level2, lambda v: setattr(self.amp.pedals, 'pitch_level2', v),
+            fmt=lambda v: 'off' if v <= 0.005 else f'{int(v*100)}%', attr='pitch_level2')
+        c = self._pcard(pg, 'Blend')
+        _sl(c, 'Mix (dry to shifted)', 0.0, 1.0, p.pitch_mix, lambda v: setattr(self.amp.pedals, 'pitch_mix', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='pitch_mix')
+        _note(c, 'Octave up is +12, octave down -12, a fifth +7. For a detuner set the interval to 0 and use a few cents at 50% mix. Works best on single notes and open chords.')
+
         pg = self._pedal_page('phaser')
         self.phaser_var = _head(pg, 'phaser', 'Enabled')
         c = self._pcard(pg, 'Sweep')
@@ -7552,7 +8870,8 @@ class App(tk.Tk):
         self._rev_page = pg
         self.rev_var = _head(pg, 'reverb', 'Enabled')
         c = self._pcard(pg, 'Type')
-        self.rev_type_var = _radio_row(c, '', [('room', 'Room'), ('plate', 'Plate'), ('spring', 'Spring'), ('cloud', 'Cloud')],
+        self.rev_type_var = _radio_row(c, '', [('room', 'Room'), ('plate', 'Plate'), ('spring', 'Spring'), ('cloud', 'Cloud'),
+                                                  ('shimmer', 'Shimmer')],
                                        'reverb_type', p.reverb_type)
         _sl(c, 'Size', 0.1, 1.0, p.reverb_size, lambda v: setattr(self.amp.pedals, 'reverb_size', v),
             fmt=lambda v: f'{int(v*100)}%', attr='reverb_size')
@@ -7564,6 +8883,11 @@ class App(tk.Tk):
             fmt=lambda v: f'{int(v*100)}%', attr='reverb_decay')
         _sl(self.rev_extra_frame, 'Damping', 0.0, 1.0, p.reverb_damp, lambda v: setattr(self.amp.pedals, 'reverb_damp', v),
             fmt=lambda v: f'{int(v*100)}%', attr='reverb_damp')
+        self.rev_shimmer_card = self._pcard(pg, 'Shimmer')
+        _sl(self.rev_shimmer_card, 'Shimmer amount', 0.0, 1.0, p.reverb_shimmer,
+            lambda v: setattr(self.amp.pedals, 'reverb_shimmer', v),
+            fmt=lambda v: f'{int(v*100)}%', attr='reverb_shimmer')
+        _note(self.rev_shimmer_card, 'How much of the tail is fed back an octave higher: more is a bigger, higher, choir-like wash.')
         self.rev_type_var.trace_add('write', lambda *_a: self._rev_refresh_ui())
         self._rev_refresh_ui()
 
@@ -7577,19 +8901,22 @@ class App(tk.Tk):
         if not HAS_PIL and not self._insp_open:      # no board to click on: open every pedal as a tab
             self._insp_open = list(self._pedal_pages)
             self._insp_sel = self._insp_open[0]
-        self._insp_open = [c for c in self._insp_open if c in self._pedal_pages]
+        self._insp_open = [c for c in self._insp_open if c in self._pedal_pages or c in self._static_pages]
         if self._insp_sel not in self._insp_open:
             self._insp_sel = self._insp_open[-1] if self._insp_open else None
         self._relayout_pedals()
         self._insp_sync(first=True)
 
     def _rebuild_pedals_ui(self):
+        _trail('rebuild pedals UI')
         """Tear down and rebuild the whole Pedals tab. _tab_pedals() reads every control's default from the pedal's
         current live value, so this is the simplest way to bring ~35 pedal controls in sync after a profile load
         sets them all programmatically. Which pedals are open in the inspector is kept."""
-        for child in self._pedals_tab_root.winfo_children():
+        for page in list(self._pedal_pages.values()):
+            page.destroy()
+        for child in self._board_inner.winfo_children():
             child.destroy()
-        self._tab_pedals(self._pedals_tab_root)
+        self._build_pedal_content()
         # The rebuilt tab makes fresh on/off variables whose initial values never fire the write-trace that
         # normally refreshes the LPD8, so push the new state to the pads explicitly.
         self._lpd8_refresh_leds(force=True)
@@ -7598,7 +8925,8 @@ class App(tk.Tk):
 
     def _open_pedal(self, code):
         """Show a pedal's controls in the inspector (the board's tiles are its tabs), opening the panel if needed."""
-        if code not in self._pedal_pages:
+        _trail(f'open inspector page {code}')
+        if code not in self._pedal_pages and code not in self._static_pages:
             return
         self._insp_open = [code]
         self._insp_sel = code
@@ -7680,10 +9008,14 @@ class App(tk.Tk):
             self._insp_swatch.delete('all')
             self._insp_swatch.create_rectangle(0, 0, 9, 9, fill=PEDAL_ICON_SPECS[self._insp_sel][1], outline='')
             self._insp_title.configure(text=PEDAL_SECTION_TITLES.get(self._insp_sel, self._insp_sel))
+        elif self._insp_sel in RIG_TILES:
+            self._insp_swatch.delete('all')
+            self._insp_swatch.create_rectangle(0, 0, 9, 9, fill=(ACCENT if self._insp_sel == AMP_MARKER else self._WIRE), outline='')
+            self._insp_title.configure(text=RIG_TILES[self._insp_sel][0] + '  ·  ' + RIG_TILES[self._insp_sel][1])
         # the page
-        for page in self._pedal_pages.values():
+        for page in list(self._pedal_pages.values()) + list(self._static_pages.values()):
             page.pack_forget()
-        sel = self._pedal_pages.get(self._insp_sel)
+        sel = self._pedal_pages.get(self._insp_sel) or self._static_pages.get(self._insp_sel)
         if sel is not None:
             sel.pack(fill='x')
             self._insp_body.update_idletasks()
@@ -7714,7 +9046,7 @@ class App(tk.Tk):
         row.pack(side='right')
         pos_var = tk.StringVar(value='')
         tk.Label(row, textvariable=pos_var, bg=BG, fg=DIM, font=(FF, 9)).pack(side='left', padx=(0, 6))
-        side = self._mini_btn(row, '', lambda: self._toggle_fx_side(name))
+        side = self._mini_btn(row, '', lambda: self._toggle_fx_side(name), width_px=86)
         side.pack(side='left', padx=2)
         up = self._mini_btn(row, '◄ Earlier', lambda: self._move_fx(name, -1))
         up.pack(side='left', padx=2)
@@ -7727,12 +9059,13 @@ class App(tk.Tk):
         self._relayout_pedals()
 
     def _pedal_is_on(self, code):
-        if code == AMP_MARKER:
+        if code == AMP_MARKER or code in RIG_TILES:
             return True
         var = getattr(self, '_pedal_on_vars', {}).get(code)
         return bool(var.get()) if var is not None else bool(getattr(self.amp.pedals, code + '_on', False))
 
     def _set_pedal_on(self, code, value):
+        _trail(f'pedal {code} on={value}')
         var = self._pedal_on_vars.get(code)
         if var is not None:
             var.set(value)
@@ -7802,7 +9135,8 @@ class App(tk.Tk):
 
     # ── the board ────────────────────────────────────────────
 
-    _BOARD_CELL_W = 88   # px each pedal tile takes on the board, padding included
+    _BOARD_CELL_W = 90   # px each pedal tile takes on the board, padding included (the gap between tiles carries the signal wire)
+    _WIRE = '#7cc8ff'    # light blue: the signal path
     _LED_STRIP_H = 15    # the strip above each icon that holds the LED and the PRE/POST tag: nothing else is drawn there
 
     def _build_pedal_board(self, parent):
@@ -7826,34 +9160,29 @@ class App(tk.Tk):
                        selectcolor='#2a3540', activebackground=BG, font=(FF, 9, 'bold'),
                        command=lambda: setattr(self.amp.pedals, 'mute', self.mute_var.get())).pack(side='left')
         self._mini_btn(top, 'Reset order', self._reset_pedal_order).pack(side='right')
+        self._mini_btn(top, 'AI tone…', self._ai_open, width_px=84).pack(side='right', padx=(0, 6))
         if not HAS_PIL:
             return
         strip = tk.Frame(parent, bg=PANEL)
         strip.pack(fill='x', padx=8, pady=6)
         self._board_frame = strip
         strip.bind('<Configure>', lambda e: self._layout_board())
-        self._chain_hdr = tk.Label(strip, text='  Chain · signal flows left to right · click a pedal to open it, drag to move it',
+        self._chain_hdr = tk.Label(strip, text='  Chain · the blue line is the signal path, left to right · click a pedal to open it, drag to move it',
                                    bg='#1a2128', fg=ACCENT, font=(FF, 9, 'bold'), anchor='w')
         self._tray_hdr = tk.Label(strip, text='  Inactive · drag a pedal onto the chain to switch it on',
                                   bg='#1a2128', fg=ACCENT, font=(FF, 9, 'bold'), anchor='w')
         self._tray_empty = tk.Label(strip, text='Every pedal is on the chain.', bg=PANEL, fg=DIM, font=(FF, 9))
         self._board_marker = tk.Frame(strip, bg=ACCENT, width=3)
         w, h = PEDAL_ICON_SIZE
+        self._fixed_sum_lbls = {}
+        self._fixed_photos = {}
+        self._fixed_tile(strip, 'input')
+        self._fixed_tile(strip, 'output')
         for code in self.amp.pedals.order:
-            cell = tk.Frame(strip, bg=PANEL, highlightthickness=2, highlightbackground=PANEL)
             if code == AMP_MARKER:
-                # Not a pedal: a fixed block marking where the NAM amp, cab IR and EQ sit. No LED, nothing to open.
-                tk.Frame(cell, bg=PANEL, height=self._LED_STRIP_H).pack()
-                c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0)
-                c.pack()
-                c.create_rectangle(2, 2, w - 2, h - 2, fill='#151515', outline=ACCENT, width=2)
-                c.create_oval(w // 2 - 14, 10, w // 2 + 14, 38, outline=ACCENT, width=2)
-                c.create_oval(w // 2 - 5, 19, w // 2 + 5, 29, fill=ACCENT, outline='')
-                c.create_text(w // 2, h - 22, text='AMP', fill=ACCENT, font=(FF, 10, 'bold'))
-                c.create_text(w // 2, h - 9, text='CAB · EQ', fill=DIM, font=(FF, 7))
-                tk.Label(cell, text='NAM', bg=PANEL, fg=ACCENT, font=(FF, 8, 'bold')).pack()
-                self._pedal_icon_cells[code] = cell
+                self._fixed_tile(strip, AMP_MARKER)
                 continue
+            cell = tk.Frame(strip, bg=PANEL, highlightthickness=2, highlightbackground=PANEL)
             photo = _get_pedal_icon_photo(code)
             if photo is None:
                 continue
@@ -7885,6 +9214,47 @@ class App(tk.Tk):
             self._board_poll_started = True
             self._poll_board()
 
+    def _fixed_tile(self, strip, code):
+        """The Input, Amp and Output blocks of the chain: a rounded dark tile in the signal-path blue (the amp in the
+        accent colour) that opens its page in the inspector. Not a pedal: no LED and nothing to drag."""
+        w, h = PEDAL_ICON_SIZE
+        col = ACCENT if code == AMP_MARKER else self._WIRE
+        cell = tk.Frame(strip, bg=PANEL, highlightthickness=2, highlightbackground=PANEL)
+        tk.Frame(cell, bg=PANEL, height=self._LED_STRIP_H).pack()
+        c = tk.Canvas(cell, width=w, height=h, bg=PANEL, highlightthickness=0, cursor='hand2')
+        c.pack()
+        if HAS_PIL:
+            ph = ImageTk.PhotoImage(_rounded_rect_image((w, h), 10, '#12171b', col, 2))
+            _UI_IMAGE_REFS.append(ph)
+            self._fixed_photos[code] = ph
+            c.create_image(0, 0, anchor='nw', image=ph)
+        else:
+            c.create_rectangle(2, 2, w - 2, h - 2, fill='#151515', outline=col, width=2)
+        if code == AMP_MARKER:
+            c.create_oval(w // 2 - 14, 10, w // 2 + 14, 38, outline=col, width=2)
+            c.create_oval(w // 2 - 5, 19, w // 2 + 5, 29, fill=col, outline='')
+            c.create_text(w // 2, h - 22, text='AMP', fill=col, font=(FF, 10, 'bold'))
+            c.create_text(w // 2, h - 9, text='CAB · EQ', fill=DIM, font=(FF, 7))
+        else:
+            c.create_oval(w // 2 - 14, 10, w // 2 + 14, 38, outline=col, width=2)
+            c.create_text(w // 2, 24, text=('IN' if code == 'input' else 'OUT'), fill=col, font=(FF, 10, 'bold'))
+            c.create_text(w // 2, h - 22, text=('GUITAR' if code == 'input' else 'SPEAKER'), fill=col, font=(FF, 8, 'bold'))
+            c.create_text(w // 2, h - 9, text=('gate · hum' if code == 'input' else 'level'), fill=DIM, font=(FF, 7))
+        name_lbl = tk.Label(cell, text=RIG_TILES[code][0], bg=PANEL, fg=col, font=(FF, 8, 'bold'))
+        name_lbl.pack()
+        sum_lbl = tk.Label(cell, text='', bg=PANEL, fg=DIM, font=(FF, 8))
+        sum_lbl.pack()
+        for wdg in (c, name_lbl, sum_lbl):
+            wdg.bind('<ButtonRelease-1>', lambda e, cd=code: self._fixed_tile_click(cd))
+        self._pedal_icon_cells[code] = cell
+        self._fixed_sum_lbls[code] = sum_lbl
+
+    def _fixed_tile_click(self, code):
+        if self._insp_open and self._insp_sel == code:
+            self._insp_close_all()
+        else:
+            self._open_pedal(code)
+
     def _layout_board(self):
         """Place the tiles: the chain (switched-on pedals and the AMP, in signal order) on a wrapping grid, then the
         tray of switched-off pedals. Cheap to call repeatedly: it only re-grids when the number of columns, the order
@@ -7898,7 +9268,7 @@ class App(tk.Tk):
         except tk.TclError:
             return
         order = [n for n in self.amp.pedals.order if n in cells]
-        chain = [n for n in order if self._pedal_is_on(n)]
+        chain = ['input'] + [n for n in order if self._pedal_is_on(n)] + ['output']
         tray = [n for n in order if not self._pedal_is_on(n)]
         key = (cols, tuple(chain), tuple(tray))
         if key == getattr(self, '_board_layout_key', None):
@@ -7912,16 +9282,115 @@ class App(tk.Tk):
         self._chain_hdr.grid(row=r, column=0, columnspan=cols, sticky='ew', padx=2, pady=(2, 3))
         r += 1
         for i, name in enumerate(chain):
-            cells[name].grid(row=r + i // cols, column=i % cols, padx=3, pady=3, sticky='n')
+            cells[name].grid(row=r + i // cols, column=i % cols, padx=9, pady=4, sticky='n')
         r += (len(chain) + cols - 1) // cols
         self._tray_hdr.grid(row=r, column=0, columnspan=cols, sticky='ew', padx=2, pady=(8, 3))
         r += 1
         if tray:
             for i, name in enumerate(tray):
-                cells[name].grid(row=r + i // cols, column=i % cols, padx=3, pady=3, sticky='n')
+                cells[name].grid(row=r + i // cols, column=i % cols, padx=9, pady=4, sticky='n')
         else:
             self._tray_empty.grid(row=r, column=0, columnspan=cols, sticky='w', padx=6, pady=8)
+        self._board_wire_later()
         self._insp_fit_later()
+
+    # ── the signal wire ──────────────────────────────────────
+
+    def _board_wire_later(self):
+        if not getattr(self, '_wire_pending', False):
+            self._wire_pending = True
+            self.after(40, self._draw_board_wire)       # a short debounce: the tiles have settled by then
+
+    def _draw_board_wire(self):
+        """A light-blue line through the chain in signal order: from the guitar into the first pedal, along the row,
+        wrapping to the next row at the edge, and out of the last. It is built from thin frames laid in the gaps
+        between the tiles (a Tk canvas cannot draw behind the tiles and show between them), so it never covers a
+        pedal's artwork or controls. Pedals in the tray are not on the path."""
+        self._wire_pending = False
+        if getattr(self, '_wire_drawing', False):
+            return
+        self._wire_drawing = True
+        try:
+            self._draw_board_wire_now()
+        finally:
+            self._wire_drawing = False
+
+    def _draw_board_wire_now(self):
+        frame = getattr(self, '_board_frame', None)
+        for w in getattr(self, '_wire_parts', []):
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        self._wire_parts = []
+        cells = getattr(self, '_pedal_icon_cells', {})
+        if frame is None or not cells:
+            return
+        try:
+            chain = ['input'] + [n for n in self.amp.pedals.order if n in cells and self._pedal_is_on(n)] + ['output']
+            if 'input' not in cells or 'output' not in cells:
+                return
+            fx, fy = frame.winfo_rootx(), frame.winfo_rooty()
+
+            def icon(name):
+                cell = cells[name]
+                if name == AMP_MARKER or name in RIG_TILES:
+                    return next(c for c in cell.winfo_children() if isinstance(c, tk.Canvas))
+                return self._pedal_tile_parts[name][0]
+
+            def geo(name):
+                c, cell = icon(name), cells[name]
+                return dict(l=c.winfo_rootx() - fx, r=c.winfo_rootx() - fx + c.winfo_width(),
+                            y=c.winfo_rooty() - fy + c.winfo_height() // 2,
+                            cl=cell.winfo_rootx() - fx, cr=cell.winfo_rootx() - fx + cell.winfo_width(),
+                            top=cell.winfo_rooty() - fy, bot=cell.winfo_rooty() - fy + cell.winfo_height(),
+                            row=int(cell.grid_info().get('row', 0)))
+            G = {n: geo(n) for n in chain}
+            col = self._WIRE
+            T = 2                                                   # line thickness
+
+            def bar(x0, y0, x1, y1):
+                x0, x1, y0, y1 = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+                f = tk.Frame(frame, bg=col)
+                f.place(x=x0, y=y0, width=max(T, x1 - x0), height=max(T, y1 - y0))
+                self._wire_parts.append(f)
+
+            def arrow(x, y):                                        # points right, tip at x
+                c = tk.Canvas(frame, width=8, height=10, bg=PANEL, highlightthickness=0)
+                c.create_polygon(0, 0, 8, 5, 0, 10, fill=col, outline='')
+                c.place(x=x - 8, y=y - 4)
+                self._wire_parts.append(c)
+
+            def dot(x, y):
+                c = tk.Canvas(frame, width=8, height=8, bg=PANEL, highlightthickness=0)
+                c.create_oval(0, 0, 7, 7, fill=col, outline='')
+                c.place(x=x - 4, y=y - 3)
+                self._wire_parts.append(c)
+            first, last = G[chain[0]], G[chain[-1]]
+            dot(4, first['y'])                                       # the guitar
+            bar(4, first['y'] - 1, first['l'], first['y'] + 1)
+            arrow(first['l'], first['y'])
+            for a, b in zip(chain, chain[1:]):
+                ga, gb = G[a], G[b]
+                if ga['row'] == gb['row']:
+                    bar(ga['r'], ga['y'] - 1, gb['l'], ga['y'] + 1)
+                    arrow(gb['l'], gb['y'])
+                else:                                                # wrap: out the right of the row, back to the left of the next
+                    row_bot = max(g['bot'] for g in G.values() if g['row'] == ga['row'])
+                    next_top = min(g['top'] for g in G.values() if g['row'] == gb['row'])
+                    ymid = (row_bot + next_top) // 2
+                    xr, xl = ga['cr'] + 4, gb['cl'] - 4
+                    bar(ga['r'], ga['y'] - 1, xr + 1, ga['y'] + 1)
+                    bar(xr, ga['y'], xr + 1, ymid + 1)
+                    bar(min(xl, xr), ymid, max(xl, xr) + 1, ymid + 1)
+                    bar(xl, ymid, xl + 1, gb['y'] + 1)
+                    bar(xl, gb['y'] - 1, gb['l'], gb['y'] + 1)
+                    arrow(gb['l'], gb['y'])
+            end = min(last['cr'] + 4, frame.winfo_width() - 14)
+            bar(last['r'], last['y'] - 1, end, last['y'] + 1)
+            arrow(end + 8, last['y'])                                # out to the speaker / interface
+        except (tk.TclError, StopIteration, KeyError):
+            pass
 
     # ── dragging tiles ───────────────────────────────────────
 
@@ -8026,6 +9495,7 @@ class App(tk.Tk):
         self._board_marker.lift()
 
     def _drop_pedal(self, code, zone, idx):
+        _trail(f'drop pedal {code} on {zone} {idx}')
         """Apply a drop: onto the chain at position idx (switching the pedal on), or onto the tray (switching it off)."""
         order = self.amp.pedals.order
         if zone == 'chain':
@@ -8046,6 +9516,17 @@ class App(tk.Tk):
 
     def _refresh_board_summaries(self):
         p = self.amp.pedals
+        fixed = getattr(self, '_fixed_sum_lbls', {})
+        try:
+            nam = pathlib.Path(self._current_nam_path).stem if getattr(self, '_current_nam_path', None) else 'no model'
+            texts = {'input': f'{self.in_gain_sl.get():+.0f} dB',
+                     AMP_MARKER: (nam if len(nam) <= 15 else nam[:14] + '…'),
+                     'output': f'master {self.master_sl.get():+.0f}'}
+            for code, lbl in fixed.items():
+                if code in texts and lbl.cget('text') != texts[code]:
+                    lbl.configure(text=texts[code])
+        except (tk.TclError, AttributeError):
+            pass
         for code, lbl in list(getattr(self, '_pedal_sum_lbls', {}).items()):
             try:
                 text = PEDAL_BOARD_SUMMARY(code, p)
@@ -8064,8 +9545,6 @@ class App(tk.Tk):
         """Outline the tile of the pedal that is showing in the inspector."""
         shown = self._insp_sel if getattr(self, '_insp_open', None) else None
         for code, cell in getattr(self, '_pedal_icon_cells', {}).items():
-            if code == AMP_MARKER:
-                continue
             try:
                 cell.configure(highlightbackground=(ACCENT if code == shown else PANEL))
             except tk.TclError:
@@ -8132,6 +9611,7 @@ class App(tk.Tk):
         page = getattr(self, '_rev_page', None)
         if page is not None:
             page.flow.set_visible(self.rev_extra_frame, self.rev_type_var.get() != 'room')
+            page.flow.set_visible(self.rev_shimmer_card, self.rev_type_var.get() == 'shimmer')
 
     def _dly_refresh_ui(self):
         linked = self.dly_link_var.get()
@@ -8159,6 +9639,11 @@ class App(tk.Tk):
                                         'The amp is still running. Quit anyway?'):
                 return
         self._save_session()
+        try:
+            if self._live_state in ('live', 'starting'):
+                self._live_q.put(('stop',))
+        except Exception:
+            pass
         try:
             if self._rec is not None:
                 self._rec_stop()

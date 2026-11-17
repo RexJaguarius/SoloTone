@@ -23,5 +23,20 @@ __pycache__/
 /build/work/
 /build/spec/
 
-# Local-only bridge to the Tank-G (UltraRig licence is noncommercial; not part of the SoloTone repo)
-/tankg-bridge/
+# Optional Tank-G add-on: only the files listed here are part of the repo. Everything else in the folder stays local
+# (notes, measurements, captures, calibration, pedal backups, development scripts).
+/tankg-bridge/*
+!/tankg-bridge/README.md
+!/tankg-bridge/LICENSE-PulseDeck-MIT.txt
+!/tankg-bridge/a2l1.py
+!/tankg-bridge/bridge.py
+!/tankg-bridge/live.py
+!/tankg-bridge/tankg_api.py
+!/tankg-bridge/backup_pedal.py
+!/tankg-bridge/ultrarig_probe.py
+!/tankg-bridge/test_tankg_api.py
+!/tankg-bridge/test_backup.py
+
+# Crash and error logs written by the app (see _install_crash_logging in solotone.py)
+solotone_error.log
+solotone_crash.log

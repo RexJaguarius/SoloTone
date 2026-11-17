@@ -408,6 +408,75 @@ class _SpringEngine:
         return out
 
 
+class _PitchEngine:
+    """Pitch shifter: two read taps sweep along a delay line and the sound is crossfaded between them, so
+    each tap is a short grain that is read faster or slower than it was written. Reading faster (ratio > 1)
+    raises the pitch, slower lowers it. The two taps sit half a sweep apart and fade with sin^2 / cos^2, which
+    sum to one, so the level stays constant. The read position never gets closer than one chunk to the write
+    position, which keeps the output the same whatever block size the audio callback uses. Adds about 3 ms of
+    delay. Good for octaves, fifths, detune and whammy-style bends; held chords get a slight roughness, as with
+    any delay-line shifter."""
+    _GRAIN = 2048                       # samples at 44.1 kHz (about 46 ms)
+
+    def __init__(self, sr):
+        self.L = max(256, int(self._GRAIN * sr / 44100.0))
+        self.base = _CHUNK + 16
+        self.line = _Line(self.L + self.base + 8)
+        self.phase = 0.0
+
+    def process(self, x, ratio):
+        x = np.asarray(x, dtype=np.float64)
+        n = len(x)
+        out = np.zeros(n)
+        inc = (1.0 - float(ratio)) / self.L
+        for lo, hi in _chunks(n, _CHUNK):
+            m = hi - lo
+            p1 = (self.phase + inc * np.arange(1, m + 1)) % 1.0
+            self.phase = float(p1[-1])
+            p2 = (p1 + 0.5) % 1.0
+            wp = self.line.wp
+            idx = np.arange(m)
+            acc = np.zeros(m)
+            for p in (p1, p2):
+                pos = wp + idx - (self.base + self.L * p)
+                i0 = np.floor(pos).astype(np.int64)
+                fr = pos - i0
+                b = self.line.buf
+                v = b.take(i0, mode='wrap') * (1.0 - fr) + b.take(i0 + 1, mode='wrap') * fr
+                acc += v * np.sin(np.pi * p) ** 2
+            self.line.write(x[lo:hi])
+            out[lo:hi] = acc
+        return out
+
+
+class _ShimmerEngine:
+    """Shimmer reverb: the Cloud plate with an octave-up pitch shifter in its feedback. What comes out of the
+    tail is shifted up an octave and fed back in, so each trip round the loop climbs another octave and
+    fades, giving the choir-like rising wash. The feedback is held back by 256 samples so it never depends
+    on the block size."""
+    _FB_DELAY = _CHUNK * 2
+
+    def __init__(self, sr):
+        self.plate = _PlateEngine(sr, big=True)
+        self.pitch = _PitchEngine(sr)
+        self.fb = _Line(self._FB_DELAY + _CHUNK)
+        self.lp = _OnePole()
+
+    def process(self, x, size, decay, damp, shimmer, ratio=2.0):
+        x = np.asarray(x, dtype=np.float64)
+        n = len(x)
+        out = np.zeros(n)
+        g = 0.55 * max(0.0, min(1.0, shimmer))
+        for lo, hi in _chunks(n, _CHUNK):
+            m = hi - lo
+            xin = x[lo:hi] + g * self.fb.read(self._FB_DELAY, m)
+            wet = self.plate.process(xin, size, decay, damp)
+            sh = self.pitch.process(wet, ratio)
+            self.fb.write(np.tanh(self.lp.process(sh, 0.25)))     # tame the top end and any build-up
+            out[lo:hi] = wet
+        return out
+
+
 # Single source of truth for the pedal chain's factory order — used both
 # to initialize a new PedalChain and by the Pedals tab's "Reset Order"
 # button, so the two can't silently drift apart the way a duplicated
@@ -424,7 +493,7 @@ class _SpringEngine:
 # distorted amp, delay repeats and reverb tails get crushed and smeared
 # by it). Default: chorus, delay and reverb after the amp.
 AMP_MARKER = 'amp'
-DEFAULT_PEDAL_ORDER = ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser',
+DEFAULT_PEDAL_ORDER = ['comp', 'wah', 'pitch', 'fuzz', 'dist', 'od', 'phaser',
                        AMP_MARKER,
                        'chorus', 'tremolo', 'rotary', 'delay', 'reverb']
 
@@ -432,7 +501,7 @@ DEFAULT_PEDAL_ORDER = ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser',
 # has no entry for them, so normalize_order() slots them in (phaser just
 # ahead of the amp, tremolo after the chorus, rotary after the tremolo). They
 # are off by default, so an old profile still sounds exactly as it did.
-_NEWER_PEDALS = ('phaser', 'tremolo', 'rotary')
+_NEWER_PEDALS = ('phaser', 'tremolo', 'rotary', 'pitch')
 
 # The previous factory orders (before phaser/tremolo, and before the rotary):
 # upgraded to the new default when they were never customised.
@@ -442,6 +511,7 @@ _PREVIOUS_DEFAULT_ORDER = ['comp', 'wah', 'fuzz', 'dist', 'od',
 _PREVIOUS_DEFAULT_ORDERS = [
     _PREVIOUS_DEFAULT_ORDER,
     ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser', AMP_MARKER, 'chorus', 'tremolo', 'delay', 'reverb'],
+    ['comp', 'wah', 'fuzz', 'dist', 'od', 'phaser', AMP_MARKER, 'chorus', 'tremolo', 'rotary', 'delay', 'reverb'],
 ]
 
 # The order before the amp marker existed — every pedal ahead of the amp.
@@ -481,6 +551,9 @@ def normalize_order(order):
     if 'rotary' not in out:
         i = out.index('tremolo') + 1 if out.index('tremolo') > out.index(AMP_MARKER) else out.index(AMP_MARKER) + 1
         out.insert(i, 'rotary')
+    if 'pitch' not in out:                       # ahead of the fuzz, as a whammy sits on a board
+        amp = out.index(AMP_MARKER)
+        out.insert(out.index('fuzz') if out.index('fuzz') < amp else out.index('phaser'), 'pitch')
     return out
 
 
@@ -603,6 +676,16 @@ class PedalChain:
         self._rot_lp_z     = np.zeros(1)
         self._rot_first    = True
 
+        # ── pitch shifter ─────────────────────────────────────
+        self.pitch_on     = False
+        self.pitch_semi   = 12           # voice 1 interval in semitones, -12..+12
+        self.pitch_cents  = 0            # fine tune for voice 1, -50..+50 cents
+        self.pitch_semi2  = 7            # voice 2 interval in semitones
+        self.pitch_level2 = 0.0          # 0-1, level of voice 2 (0 = off)
+        self.pitch_mix    = 0.5          # 0 = dry ... 1 = shifted voices only
+        self._pitch_eng   = [None, None]
+        self._pitch_dry   = np.zeros(0)
+
         # ── chorus / flanger / vibrato / doubler ─────────────
         self.chorus_on    = False
         self.chorus_mode  = 'chorus'     # 'chorus' | 'flanger' | 'vibrato' | 'doubler'
@@ -630,11 +713,12 @@ class PedalChain:
 
         # ── reverb (Schroeder) ────────────────────────────────
         self.reverb_on    = False
-        self.reverb_type  = 'room'       # 'room' | 'plate' | 'spring' | 'cloud'
+        self.reverb_type  = 'room'       # 'room' | 'plate' | 'spring' | 'cloud' | 'shimmer'
         self.reverb_mix   = 0.25
         self.reverb_size  = 0.6          # 0–1, scales delay times
         self.reverb_decay = 0.5          # 0-1, length of the tail (plate / spring / cloud; the room reverb has a fixed decay)
-        self.reverb_damp  = 0.5          # 0-1, how dark the tail gets (plate / spring / cloud)
+        self.reverb_damp  = 0.5          # 0-1, how dark the tail gets (plate / spring / cloud / shimmer)
+        self.reverb_shimmer = 0.5        # 0-1, how much of the tail is fed back an octave up (shimmer only)
         self._rev_engines = {}           # built the first time each type is used
         # Comb filter delays (prime-ish lengths in samples at 44100)
         _base = [1557, 1617, 1491, 1422]
@@ -1056,6 +1140,32 @@ class PedalChain:
         np.clip(out, -1, 1, out=out)
         return out
 
+    def _fx_pitch(self, y):
+        """Pitch shifter with one or two voices (octaves, fifths, detune). Mix 0 is the dry sound, 1 the shifted
+        voices alone; a small Cents amount at 0 semitones makes a detuner."""
+        if not self.pitch_on: return y
+        x = np.asarray(y, dtype=np.float64)
+        mix = max(0.0, min(1.0, float(self.pitch_mix)))
+        if mix <= 0.0 or len(x) == 0:
+            return x
+        r1 = 2.0 ** ((float(self.pitch_semi) + float(self.pitch_cents) / 100.0) / 12.0)
+        if self._pitch_eng[0] is None:
+            self._pitch_eng[0] = _PitchEngine(self.sr)
+        wet = self._pitch_eng[0].process(x, r1)
+        lvl2 = max(0.0, min(1.0, float(self.pitch_level2)))
+        if lvl2 > 0.0:
+            if self._pitch_eng[1] is None:
+                self._pitch_eng[1] = _PitchEngine(self.sr)
+            wet = wet + lvl2 * self._pitch_eng[1].process(x, 2.0 ** (float(self.pitch_semi2) / 12.0))
+        # the dry path is delayed to match the shifter so the two do not comb against each other
+        d = self._pitch_eng[0].base
+        hist = self._pitch_dry if len(self._pitch_dry) == d else np.zeros(d)
+        buf = np.concatenate((hist, x))
+        self._pitch_dry = buf[-d:]
+        out = buf[:len(x)] * (1.0 - mix) + wet * mix
+        np.clip(out, -1, 1, out=out)
+        return out
+
     def _fx_delay(self, y):
         if not self.delay_on: return y
         dt   = self._delay_time_secs()
@@ -1081,6 +1191,13 @@ class PedalChain:
     def _fx_reverb(self, y):
         if not self.reverb_on: return y
         rtype = self.reverb_type
+        if rtype == 'shimmer':
+            eng = self._rev_engines.get('shimmer')
+            if eng is None:
+                eng = _ShimmerEngine(self.sr)
+                self._rev_engines['shimmer'] = eng
+            wet = eng.process(y, self.reverb_size, self.reverb_decay, self.reverb_damp, self.reverb_shimmer)
+            return np.asarray(y, dtype=np.float64) * (1 - self.reverb_mix) + wet * self.reverb_mix
         if rtype in ('plate', 'cloud', 'spring') and (HAS_SCIPY or rtype != 'spring'):
             eng = self._rev_engines.get(rtype)
             if eng is None:
@@ -1127,6 +1244,7 @@ class PedalChain:
     _FX_FUNCS = {
         'comp':    '_fx_comp',
         'wah':     '_fx_wah',
+        'pitch':   '_fx_pitch',
         'fuzz':    '_fx_fuzz',
         'dist':    '_fx_dist',
         'od':      '_fx_od',

@@ -80,11 +80,18 @@
     <p class="lead">SoloTone runs Neural Amp Modeler captures through FFT cab IRs, a five-band EQ and a pre/post-amp
       pedal chain inside a single duplex audio callback &mdash; with wet and dry WAV recording and offline re-amping.
       A 256-sample block is 5.8 ms; the whole chain averages about half of that budget on a modern desktop CPU.
-      No cloud, no account, no telemetry.</p>
+      No cloud, no account, no telemetry. Describe a tone in words and let an AI build the pedals and scenes for you.</p>
     <div class="hero-ctas">
       <a class="btn btn-primary" href="download.html">Get SoloTone</a>
       <a class="btn btn-ghost" href="specs.html">Read the specs</a>
     </div>
+  </section>
+
+  <section style="padding-block:0 28px">
+    <figure class="shot shot-hero">
+      <a href="img/rig.png"><img src="img/rig.png" width="1280" height="860" alt="SoloTone's Rig tab: input, compressor, amp, chorus, rotary, delay, reverb and output joined by a light-blue signal path, with the delay's settings open underneath and scene buttons A to D in the top bar"></a>
+      <figcaption><b>The Rig tab.</b> The whole signal path on one screen, joined by a light-blue line. Click a pedal to open its settings underneath, drag it to move or switch it on. Scenes A to D sit in the top bar.</figcaption>
+    </figure>
   </section>
 
   <section style="padding-block:0 8px">
@@ -142,11 +149,24 @@
   </section>
 
   <section>
+    <div class="section-head">
+      <span class="eyebrow">New in rc2</span>
+      <h2>Describe a tone. Get a rig.</h2>
+      <p>Type &ldquo;clean-ish intro, crunchy verse, big chorus, a short delay for the solo&rdquo; and AI tone builds the
+        pedals, EQ, gain and up to four scenes around your amp capture. Use any chat AI for free by copying a prompt and pasting
+        the answer back, or ask Claude directly with your own API key. Every value is clamped to the real range of its control,
+        and one click undoes it.</p>
+    </div>
+    <figure class="shot" style="max-width:520px;margin:0 auto"><a href="img/ai-tone.png"><img src="img/ai-tone.png" loading="lazy" width="660" height="872" alt="The AI tone window: a description of the sound, the free copy-and-paste route, the optional API route, and a result showing four scenes"></a><figcaption>The AI tone window, shown with a sample reply pasted in.</figcaption></figure>
+    <p style="margin-top:22px"><a class="btn btn-ghost" href="features.html">All the features &rarr;</a></p>
+  </section>
+
+  <section>
     <div class="cta-band">
       <div>
         <h2>No cloud. No account. No subscription.</h2>
-        <p>SoloTone runs entirely on your machine and never talks to the internet — what you
-          play stays exactly where you played it.</p>
+        <p>SoloTone runs entirely on your machine and never phones home. The only thing that can leave it is an
+          AI tone request you choose to send, with your own key &mdash; what you play stays exactly where you played it.</p>
       </div>
       <a class="btn btn-primary" href="download.html">Get SoloTone</a>
     </div>

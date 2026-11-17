@@ -157,7 +157,7 @@ def test_every_pedal_setting_is_in_the_profile_and_preset_fields():
     assert {'phaser_rate', 'phaser_depth', 'tremolo_rate', 'tremolo_depth', 'reverb_decay'} <= set(st.MIDI_TARGETS_BY_ID)
     cycle = st.PEDAL_MODE_CYCLE
     assert 'bd2' in cycle['pedal_od_on'][1] and {'vibrato', 'doubler'} <= set(cycle['pedal_chorus_on'][1])
-    assert cycle['pedal_reverb_on'] == ('reverb_type', ['room', 'plate', 'spring', 'cloud'])
+    assert cycle['pedal_reverb_on'] == ('reverb_type', ['room', 'plate', 'spring', 'cloud', 'shimmer'])
 
 
 def test_every_shipped_profile_still_loads_into_the_offline_chain():
@@ -186,7 +186,7 @@ def test_the_pedals_tab_and_profiles_in_the_app():
             app.update()
             from tkinter import ttk
             nb = next(w for w in app.winfo_children() if isinstance(w, ttk.Notebook))
-            nb.select(2)
+            nb.select(0)
             app.update()
             p = app.amp.pedals
 
@@ -194,7 +194,7 @@ def test_the_pedals_tab_and_profiles_in_the_app():
             # signal order, row by row, and switched-off ones wait in the tray underneath
             order = p.order
             cells = app._pedal_icon_cells
-            assert set(cells) == set(order) and len(order) == 12, sorted(cells)
+            assert set(cells) == set(order) | {'input', 'output'} and len(order) == 13, sorted(cells)
             assert set(app._pedal_sum_lbls) == {c for c in order if c != st.AMP_MARKER}
 
             def grid_pos(c):
@@ -211,13 +211,13 @@ def test_the_pedals_tab_and_profiles_in_the_app():
             tray = [c for c in p.order if c not in chain]
             assert tray and all(grid_pos(c)[0] > max(r for r, _ in pos) for c in tray), 'the tray sits below the chain'
             cols_now = max(col for _, col in pos) + 1
-            app.geometry('1700x760'); app.update(); app.update()
+            app.geometry('1700x900'); app.update(); app.update()
             wide = [grid_pos(c) for c in chain]
             assert wide == sorted(wide)
             rows = lambda ps: max(r for r, _ in ps) - min(r for r, _ in ps)
             assert rows(wide) == 0 or max(col for _, col in wide) + 1 > cols_now, \
                 'a wider window must let more pedals fit on a row'
-            app.geometry('900x760'); app.update(); app.update()
+            app.geometry('900x900'); app.update(); app.update()
 
             # the LED sits in its own strip above the icon, so it never covers the artwork
             for c, (led_c, _tag) in app._pedal_side_lbls.items():
@@ -225,6 +225,17 @@ def test_the_pedals_tab_and_profiles_in_the_app():
                 assert led_c.winfo_y() + led_c.winfo_height() <= icon_c.winfo_y(), f'{c}: the LED strip overlaps the icon'
 
             # no pedal is open until one is clicked; then the inspector docks at the bottom with the pedal's own tab
+            # the Amp page (NAM, cabinet IRs, EQ) is what the inspector shows at first
+            assert app._insp_open == ['amp'] and app._static_pages['amp'].winfo_manager() == 'pack'
+            for code in ('input', 'output', 'amp'):                                 # the three fixed tiles open their pages
+                app._fixed_tile_click(code) if app._insp_sel != code else None
+                app.update()
+                assert app._insp_sel == code and app._static_pages[code].winfo_manager() == 'pack', code
+                assert app._pedal_icon_cells[code].cget('highlightbackground') == st.ACCENT
+            for attr in ('in_gain_sl', 'out_gain_sl', 'master_sl', 'gate_sl', 'hum_var', 'nam_lbl', 'ir_slot_rows',
+                         'eq_on_var', 'amp_in_box', 'amp_out_box', 'bs_var', 'hostapi_box'):
+                assert hasattr(app, attr), attr                                     # every audio setting is still there
+            app._insp_close_all(); app.update()
             assert not app._insp_open and str(app._insp) not in [str(x) for x in app._pedals_paned.panes()]
             app._tile_press('wah', type('E', (), dict(x_root=10, y_root=10))())
             app._tile_release('wah', type('E', (), dict(x_root=10, y_root=10))())          # a click, not a drag
@@ -290,11 +301,15 @@ def test_the_pedals_tab_and_profiles_in_the_app():
 
             # Decay / Damping are shown for every reverb type except Room
             app.rev_type_var.set('room'); app.update()
-            assert not app.rev_extra_frame.winfo_manager()
+            assert not app.rev_extra_frame.outer.winfo_manager()
             app.rev_type_var.set('plate'); app.update()
-            assert app.rev_extra_frame.winfo_manager() == 'grid'
+            assert app.rev_extra_frame.outer.winfo_manager() == 'grid'
             # ...and the MIDI/pad mode-cycle moves the on-screen type radio with it
             p.reverb_type = 'cloud'
+            assert app._cycle_pedal_mode('pedal_reverb_on') == 'shimmer'
+            assert app.rev_type_var.get() == 'shimmer'
+            app.update()
+            assert app._rev_page.flow.winfo_children()      # the page is built
             assert app._cycle_pedal_mode('pedal_reverb_on') == 'room'
             assert app.rev_type_var.get() == 'room'
 
@@ -305,6 +320,8 @@ def test_the_pedals_tab_and_profiles_in_the_app():
             p.chorus_mode = 'doubler'; p.od_mode = 'bd2'
             p.rotary_on = True; p.rotary_speed = 'fast'; p.rotary_slow = 1.1; p.rotary_fast = 8.0
             p.rotary_depth = 0.9; p.rotary_ramp = 0.2; p.rotary_mix = 0.7
+            p.pitch_on = True; p.pitch_semi = -7; p.pitch_cents = 12; p.pitch_semi2 = 5; p.pitch_level2 = 0.4; p.pitch_mix = 0.65
+            p.reverb_shimmer = 0.8
             p.wah_on = True; p.wah_mode = 'envelope'; p.wah_env_sens = 0.8; p.wah_env_decay = 0.2
             p.wah_env_type = 'lowpass'; p.wah_env_dir = 'down'; p.fuzz_mode = 'tone_bender'
             app.amp.gate_mode = 'smart'; app.amp.gate_range = 33.0; app.amp.gate_hold = 80.0
@@ -318,6 +335,8 @@ def test_the_pedals_tab_and_profiles_in_the_app():
             p.reverb_decay = 0.0; p.chorus_mode = 'chorus'; p.od_mode = 'klon'
             p.rotary_on = False; p.rotary_speed = 'slow'; p.rotary_slow = 0.5; p.rotary_fast = 5.0
             p.rotary_depth = 0.1; p.rotary_ramp = 0.9; p.rotary_mix = 0.2
+            p.pitch_on = False; p.pitch_semi = 12; p.pitch_cents = 0; p.pitch_semi2 = 0; p.pitch_level2 = 0.0; p.pitch_mix = 0.1
+            p.reverb_shimmer = 0.1
             p.wah_mode = 'manual'; p.wah_env_sens = 0.1; p.wah_env_type = 'wah'; p.wah_env_dir = 'up'; p.fuzz_mode = 'fuzz_face'
             app.amp.gate_mode = 'standard'; app.amp.gate_range = 10.0
             app._apply_profile(json.loads(json.dumps(data)), str(tmp_path / 'round trip.stprofile'))
@@ -327,6 +346,9 @@ def test_the_pedals_tab_and_profiles_in_the_app():
             assert (p.chorus_mode, p.od_mode) == ('doubler', 'bd2')
             assert (p.wah_mode, p.wah_env_sens, p.wah_env_decay, p.wah_env_type, p.wah_env_dir) == ('envelope', 0.8, 0.2, 'lowpass', 'down')
             assert p.fuzz_mode == 'tone_bender'
+            assert (p.pitch_on, p.pitch_semi, p.pitch_cents, p.pitch_semi2, p.pitch_level2, p.pitch_mix) == (True, -7, 12, 5, 0.4, 0.65)
+            assert p.reverb_shimmer == 0.8
+            assert app._pedal_sum_lbls['pitch'].cget('text').startswith('-7 st')
             assert (p.rotary_on, p.rotary_speed, p.rotary_slow, p.rotary_fast, p.rotary_depth, p.rotary_ramp,
                     p.rotary_mix) == (True, 'fast', 1.1, 8.0, 0.9, 0.2, 0.7)
             assert app._pedal_sum_lbls['rotary'].cget('text') in ('Slow', 'Fast', 'Brake')

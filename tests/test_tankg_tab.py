@@ -20,6 +20,25 @@ class FakeAPI(types.SimpleNamespace):
     pass
 
 
+class FakeLive:
+    """Stands in for tankg_api.LiveSession: records what the app would send to the pedal."""
+    instances = []
+
+    def __init__(self, port, audio_loader=None, log=print, progress=None, transport=None):
+        self.port, self.started, self.syncs, self.closed = port, None, [], False
+        FakeLive.instances.append(self)
+
+    def start(self, profile):
+        self.started = profile
+        return {}
+
+    def sync(self, profile):
+        self.syncs.append(profile)
+
+    def close(self):
+        self.closed = True
+
+
 def make_fake(presets=None):
     calls = []
 
@@ -39,7 +58,7 @@ def make_fake(presets=None):
     api = FakeAPI(available=lambda: (True, ''),
                   find_ports=lambda: [('COM3', 'Some Bluetooth port', False), ('COM9', 'USB Serial Device', True)],
                   read_state=read_state, send_sound=send_sound,
-                  slot_label=lambda n: '%d%s' % (n // 4 + 1, 'ABCD'[n % 4]))
+                  slot_label=lambda n: '%d%s' % (n // 4 + 1, 'ABCD'[n % 4]), LiveSession=FakeLive)
     return api, calls
 
 
@@ -81,7 +100,8 @@ def test_tab_flow_with_a_fake_addon():
         try:
             app.update()
             tabs = [app._notebook.tab(i, 'text').strip() for i in range(app._notebook.index('end'))]
-            assert 'Tank-G' in tabs and tabs.index('Tank-G') < tabs.index('Settings')
+            assert tabs == ['Rig', 'Play', 'Library', 'Settings']           # the Tank-G section lives in Settings, as a pill
+            assert 'tankg' in app._settings_pages
 
             # the panel says up front that the pedal needs the UltraRig firmware, with a working link to it
             def labels(w):
@@ -91,13 +111,14 @@ def test_tab_flow_with_a_fake_addon():
                         out.append(c.cget('text'))
                     out += labels(c)
                 return out
-            texts = ' '.join(labels(app._notebook.nametowidget(app._notebook.tabs()[tabs.index('Tank-G')])))
+            texts = ' '.join(labels(app._settings_pages['tankg']))
             assert 'Needs the UltraRig firmware' in texts and 'stock M-VAVE firmware' in texts
             opened = []
             real_open = st.App._open_url
             st.App._open_url = staticmethod(lambda url: opened.append(url))
             try:
-                app._notebook.select(tabs.index('Tank-G'))
+                app._notebook.select(st.App.TAB_SETTINGS)
+                app._pill_selectors['_settings_sel']('tankg')
                 app.update()
                 app.tg_ultrarig_link.event_generate('<Button-1>', x=2, y=2)
                 app.update()
@@ -119,6 +140,55 @@ def test_tab_flow_with_a_fake_addon():
             app._tg_play()
             assert pump(app, lambda: calls and not app._tg_busy)
             assert calls[-1]['save'] is False and calls[-1]['slot'] is None and not asked
+
+            # The Library page has its own "Load to Tank-G": it loads the selected profile and plays it, saving nothing
+            assert app.lib_tg_btn is not None and str(app.lib_tg_btn.cget('state')) != 'disabled'
+            prof = pathlib.Path(tmp) / 'lib.stprofile'
+            import json
+            prof.write_text(json.dumps(app._gather_profile_dict('lib')))
+            app._lib_sel = None
+            app._library_to_tankg()
+            assert 'Pick a profile' in app.lib_tg_lbl.cget('text') and len(calls) == 1
+            app._lib_sel = str(prof)
+            app._library_to_tankg()
+            assert pump(app, lambda: len(calls) == 2 and not app._tg_busy)
+            assert calls[-1]['save'] is False and calls[-1]['port'] == 'COM9' and not asked
+            assert app._current_profile_path == str(prof)
+            assert 'scenes' in calls[-1]['profile']
+            assert 'nothing was saved' in app.lib_tg_lbl.cget('text')
+            calls.pop()
+
+            # Live mode: SoloTone as the remote of the pedal, nothing stored
+            assert app.live_btn is not None
+            FakeLive.instances.clear()
+            app._live_toggle()                                    # no amp capture loaded: nothing to play, refused
+            assert app._live_state == 'off' and not FakeLive.instances and 'capture' in app.live_lbl.cget('text')
+            app._current_nam_path = 'amp.nam'
+            app._live_toggle()
+            assert pump(app, lambda: app._live_state == 'live')
+            ses = FakeLive.instances[-1]
+            assert ses.port == 'COM9' and ses.started is not None and 'scenes' in ses.started
+            assert app._tg_busy                                   # the Tank-G tab's own buttons are locked meanwhile
+            app._set_pedal_on('od', not app.amp.pedals.od_on)     # a pedal switched on or off is sent
+            assert pump(app, lambda: len(ses.syncs) == 1)
+            assert ses.syncs[-1]['pedals']['od_on'] == app.amp.pedals.od_on
+            app._scene_select(1)                                  # scene B starts as a copy of A: nothing new to send
+            app._set_pedal_on('delay', not app.amp.pedals.delay_on)
+            assert pump(app, lambda: len(ses.syncs) == 2)
+            app._scene_select(0)                                  # back to A: its state is sent
+            assert pump(app, lambda: len(ses.syncs) == 3)
+            assert ses.syncs[-1]['scenes']['active'] == 0
+            n = len(ses.syncs)
+            for _ in range(10):
+                app.update(); time.sleep(0.05)
+            assert len(ses.syncs) == n                            # idle: nothing is sent
+            app._current_nam_path = 'other.nam'                   # a different capture sends the sound again
+            assert pump(app, lambda: len(FakeLive.instances) == 2 and app._live_state == 'live')
+            assert FakeLive.instances[0].closed and FakeLive.instances[1].started is not None
+            app._live_toggle()                                    # stop
+            assert pump(app, lambda: app._live_state == 'off' and not app._tg_busy)
+            assert FakeLive.instances[-1].closed
+            app._current_nam_path = None
 
             # Save to a free slot: one confirmation
             answers[:] = [True]

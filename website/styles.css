@@ -226,3 +226,12 @@ code, .code-line{
   border-radius: 10px; background: var(--panel); color: #c9d2d8; font-size: .95rem; max-width: 80ch;
 }
 .note-box strong{ color: var(--ink); }
+
+/* ---------- screenshots ---------- */
+.shot{ margin: 0; }
+.shot a{ display:block; }
+.shot img{ display:block; width:100%; height:auto; border:1px solid var(--rule); border-radius:12px; background: var(--panel); }
+.shot figcaption{ margin-top: 10px; color: var(--muted); font-size: .92rem; max-width: 70ch; }
+.shot figcaption b{ color: var(--ink); font-weight: 600; }
+.shot-hero{ max-width: 1100px; }
+.shots{ display:grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 32px 28px; }

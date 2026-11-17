@@ -105,3 +105,19 @@ Names such as Fuzz Face, Big Muff, Boss DS-1, ProCo RAT, MXR Distortion+,
 Tube Screamer and Klon are trademarks of their respective owners. They are
 used only to describe the type of circuit an effect is modeled on. SoloTone
 is not affiliated with or endorsed by any of those companies.
+
+
+6. Tank-G add-on (optional, tankg-bridge/)
+------------------------------------------
+The optional Tank-G add-on talks to an M-VAVE Tank-G pedal that runs the
+third-party UltraRig firmware. UltraRig is a separate project by its own
+author, under its own license; SoloTone and the add-on contain none of its
+code, files or documentation, and are not made, endorsed or supported by the
+UltraRig author or by M-VAVE. "Tank-G" and "UltraRig" are used only to say
+what the add-on works with.
+
+tankg-bridge/a2l1.py is a Python port of the NAM-to-A2L1 capture converter in
+PulseDeck (https://github.com/wilianlimasantos/PulseDeck), Copyright (c) 2026
+Wilian de Lima Santos, MIT License. The license text is in
+tankg-bridge/LICENSE-PulseDeck-MIT.txt and the notice is kept in the header
+of a2l1.py.
