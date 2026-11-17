@@ -5597,6 +5597,11 @@ class App(tk.Tk):
         amp = self.amp
         missing = []
 
+        # A different profile ends Tank-G live mode: the pedal must not be left playing the old sound while SoloTone shows another.
+        if getattr(self, '_live_state', 'off') in ('live', 'starting'):
+            self._live_stop()
+            self._live_say('Live stopped: a different profile was loaded. Press Go live to play it on the pedal.')
+
         self._clear_nam()
         for idx in range(MAX_IR_SLOTS):
             self._clear_ir(idx)

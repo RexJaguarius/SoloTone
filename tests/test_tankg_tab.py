@@ -188,6 +188,15 @@ def test_tab_flow_with_a_fake_addon():
             app._live_toggle()                                    # stop
             assert pump(app, lambda: app._live_state == 'off' and not app._tg_busy)
             assert FakeLive.instances[-1].closed
+
+            # Loading another profile while live stops live mode (and does not restart it)
+            app._current_nam_path = 'amp.nam'
+            app._live_toggle()
+            assert pump(app, lambda: app._live_state == 'live')
+            n_inst = len(FakeLive.instances)
+            app._load_profile_path(str(prof))
+            assert pump(app, lambda: app._live_state == 'off' and not app._tg_busy)
+            assert FakeLive.instances[-1].closed and len(FakeLive.instances) == n_inst
             app._current_nam_path = None
 
             # Save to a free slot: one confirmation
